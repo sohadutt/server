@@ -2,6 +2,7 @@
 *.d
 .cache
 build
+logs
 
 # Object files
 *.o

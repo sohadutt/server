@@ -8,6 +8,8 @@
 #include "logger.h"
 
 static FILE *log_file = NULL;
+static LogLevel minimum_level = LOG_INFO;
+static int log_to_console = 1;
 
 static int ensure_dir(const char *path) {
   struct stat st;
@@ -51,11 +53,16 @@ int logger_init(const ServerConfig *config) {
     return -1;
   }
 
-  const char *log_dir = config->log_directory;
+  minimum_level = config->log_level;
+  log_to_console = config->log_console || config->log_level == LOG_DEBUG;
+  log_file = NULL;
 
-  if (ensure_dir(log_dir) != 0) {
+  if (!config->log_file)
+    return 0;
+
+  const char *log_dir = config->log_directory;
+  if (ensure_dir(log_dir) != 0)
     return -1;
-  }
 
   time_t now = time(NULL);
   struct tm tm_now;
@@ -67,10 +74,9 @@ int logger_init(const ServerConfig *config) {
 
   char filename[512];
 
-  int written = snprintf(
-      filename, sizeof(filename), "%s/%04d-%02d-%02d_%02d-%02d-%02d.log",
-      log_dir, tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday,
-      tm_now.tm_hour, tm_now.tm_min, tm_now.tm_sec);
+  int written =
+      snprintf(filename, sizeof(filename), "%s/%04d-%02d-%02d.log", log_dir,
+               tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
 
   if (written < 0 || (size_t)written >= sizeof(filename)) {
     fprintf(stderr, "Log filename is too long\n");
@@ -108,10 +114,8 @@ static const char *level_to_string(LogLevel level) {
 }
 
 void log_message(LogLevel level, const char *message) {
-  if (log_file == NULL) {
-    fprintf(stderr, "Logger has not been initialized\n");
+  if (level < minimum_level)
     return;
-  }
 
   if (message == NULL) {
     message = "(null)";
@@ -124,12 +128,19 @@ void log_message(LogLevel level, const char *message) {
     return;
   }
 
-  fprintf(log_file, "%04d-%02d-%02d %02d:%02d:%02d [%s] %s\n",
-          tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday,
-          tm_now.tm_hour, tm_now.tm_min, tm_now.tm_sec, level_to_string(level),
-          message);
-
-  fflush(log_file);
+  char line[1200];
+  int length = snprintf(
+      line, sizeof(line), "%04d-%02d-%02d %02d:%02d:%02d [%s] %s\n",
+      tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday, tm_now.tm_hour,
+      tm_now.tm_min, tm_now.tm_sec, level_to_string(level), message);
+  if (length < 0)
+    return;
+  if (log_to_console)
+    fputs(line, stderr);
+  if (log_file != NULL) {
+    fputs(line, log_file);
+    fflush(log_file);
+  }
 }
 
 void log_debug(const char *message) { log_message(LOG_DEBUG, message); }

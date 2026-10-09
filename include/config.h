@@ -18,6 +18,7 @@ typedef struct ServerConfig {
 
 } ServerConfig;
 
+void config_defaults(ServerConfig *config);
 int config_load(const char *filename, ServerConfig *config);
 
 #endif

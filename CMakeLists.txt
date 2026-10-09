@@ -29,7 +29,7 @@ add_executable(http_server
     src/tls/tls.c
 
     src/utils/logger.c
-    src/utils/utils.c
+    src/utils/resource_monitor.c
 
     src/workers/thread_pool.c
 )

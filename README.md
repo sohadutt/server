@@ -1,8 +1,9 @@
 # HTTP Server
 
-A C project organized for an HTTP server. The executable loads
-`config/server.conf`, configures logging, and listens for HTTP connections on
-the configured address and port.
+A small C HTTP server with separate modules for configuration, TCP sockets,
+connections, HTTP requests and responses, static files, logging, and resource
+monitoring. The server reads up to 4,095 bytes from a client and serves files
+from the configured document root.
 
 ## Build
 
@@ -41,34 +42,23 @@ With `log_level = debug`, each handled connection also logs request timing,
 CPU time, page faults, context switches, bytes received and sent, and the
 server process's peak resident memory.
 
----
+## Code layout
 
-# Project Structure
+The active request path is:
 
-```text
-http_server/
-├── CMakeLists.txt
-├── Makefile
-├── README.md
-├── LICENSE
-├── include/          Public headers
-├── src/
-│   ├── http/
-│   ├── network/
-│   ├── router/
-│   ├── server/
-│   ├── static/
-│   ├── tls/
-│   ├── utils/
-│   ├── workers/
-│   └── main.c
-├── tests/
-│   ├── integration/
-│   └── unit/
-├── config/            Server and MIME configuration
-├── certs/             Local TLS certificate files
-├── public/            Static web content
-└── scripts/           Development utilities
-```
+1. `main.c` loads configuration and initializes logging.
+2. `server.c` starts the listener and accepts connections.
+3. `network/socket.c` owns TCP listen and accept operations.
+4. `server/connection.c` handles one client connection.
+5. `http/request.c` reads and logs the request; `http/parser.c` parses its request line.
+6. `static/static.c` safely resolves and loads files under the document root.
+7. `http/response.c` writes the selected file and status to the client.
+8. `utils/resource_monitor.c` records per-request metrics in debug mode.
+
+Headers in `include/` define the interfaces between these modules. The event
+loop, router, static file, TLS, and worker-pool files are scaffolding and are
+not part of the active request path yet. `worker_threads` and `document_root`
+are loaded from configuration for those future modules; the current handler
+uses a fixed response and one synchronous connection at a time.
 
 ---

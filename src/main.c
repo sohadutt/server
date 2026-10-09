@@ -1,9 +1,15 @@
+#include <stdio.h>
+
 #include "config.h"
 #include "logger.h"
 #include "server.h"
-#include <stdio.h>
 
 int main(int argc, char **argv) {
+  if (argc > 2) {
+    fprintf(stderr, "Usage: %s [config-file]\n", argv[0]);
+    return 2;
+  }
+
   const char *config_path = argc > 1 ? argv[1] : "config/server.conf";
   ServerConfig config;
 
@@ -18,8 +24,6 @@ int main(int argc, char **argv) {
   }
 
   log_info("Starting Server");
-  fflush(stdout);
-
   int result = server_start(&config);
 
   logger_close();

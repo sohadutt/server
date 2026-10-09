@@ -11,6 +11,8 @@ static FILE *log_file = NULL;
 static LogLevel minimum_level = LOG_INFO;
 static int log_to_console = 1;
 
+#define LOG_LINE_CAPACITY 8192
+
 static int ensure_dir(const char *path) {
   struct stat st;
 
@@ -128,7 +130,7 @@ void log_message(LogLevel level, const char *message) {
     return;
   }
 
-  char line[1200];
+  char line[LOG_LINE_CAPACITY];
   int length = snprintf(
       line, sizeof(line), "%04d-%02d-%02d %02d:%02d:%02d [%s] %s\n",
       tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday, tm_now.tm_hour,

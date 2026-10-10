@@ -7,6 +7,10 @@ from the configured document root.
 
 ## Build
 
+Requires CMake 3.30 or newer and a C compiler. CMake selects the latest C
+standard it supports with the active compiler, disables compiler-specific C
+extensions, and enables strict warnings for Clang and GCC.
+
 ```sh
 cmake -S . -B build
 cmake --build build
@@ -24,16 +28,16 @@ Pass a config file path as the first argument to use a different config:
 `config/server.conf` uses one `key = value` setting per line. Blank lines and
 lines beginning with `#` are ignored. Missing settings use these defaults:
 
-| Setting | Default | Valid values |
-| --- | --- | --- |
-| `host` | `0.0.0.0` | Host name or IP address |
-| `port` | `8080` | `1`–`65535` |
-| `worker_threads` | `4` | `1`–`1024` |
-| `document_root` | `public` | Non-empty path |
-| `log_level` | `info` | `debug`, `info`, `warn`, `error` |
-| `log_console` | `true` | `true`, `false`, `1`, `0` |
-| `log_file` | `true` | `true`, `false`, `1`, `0` |
-| `log_directory` | `logs` | Non-empty path |
+| Setting          | Default   | Valid values                     |
+| ---------------- | --------- | -------------------------------- |
+| `host`           | `0.0.0.0` | Host name or IP address          |
+| `port`           | `8080`    | `1`–`65535`                      |
+| `worker_threads` | `4`       | `1`–`1024`                       |
+| `document_root`  | `public`  | Non-empty path                   |
+| `log_level`      | `info`    | `debug`, `info`, `warn`, `error` |
+| `log_console`    | `true`    | `true`, `false`, `1`, `0`        |
+| `log_file`       | `true`    | `true`, `false`, `1`, `0`        |
+| `log_directory`  | `logs`    | Non-empty path                   |
 
 Unknown settings and invalid values stop startup with the config filename and
 line number.

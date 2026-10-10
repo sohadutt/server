@@ -13,8 +13,8 @@
 #include "static.h"
 
 static void log_peer(const struct sockaddr *address, socklen_t address_length) {
-  char host[NI_MAXHOST];
-  char service[NI_MAXSERV];
+  char host[128];
+  char service[16];
   if (address != NULL &&
       getnameinfo(address, address_length, host, sizeof(host), service,
                   sizeof(service), NI_NUMERICHOST | NI_NUMERICSERV) == 0) {
@@ -64,18 +64,17 @@ void connection_handle(int client, const struct sockaddr *peer_address,
     reason_phrase = "Not Found";
   }
 
-  if (status_code != 200 &&
-      static_file_load(config->document_root, "/404.html", &response_file) !=
-          0) {
+  if (status_code != 200 && static_file_load(config->document_root, "/404.html",
+                                             &response_file) != 0) {
     log_error("Could not load the configured 404 page");
   }
 
   const char *content_type = response_file.content_type != NULL
                                  ? response_file.content_type
                                  : "text/html; charset=utf-8";
-  size_t bytes_sent = http_response_send(
-      client, status_code, reason_phrase, content_type, response_file.data,
-      response_file.length);
+  size_t bytes_sent =
+      http_response_send(client, status_code, reason_phrase, content_type,
+                         response_file.data, response_file.length);
 
   if (monitor_request) {
     resource_monitor_log_request(&request_start, request.data, request.length,

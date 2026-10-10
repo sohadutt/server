@@ -17,8 +17,8 @@ int server_socket_listen(const char *host, unsigned short port, int backlog) {
   hints.ai_family = AF_UNSPEC;
   hints.ai_socktype = SOCK_STREAM;
   hints.ai_flags = host == NULL ? AI_PASSIVE : 0;
-
   struct addrinfo *addresses = NULL;
+
   int status = getaddrinfo(host, service, &hints, &addresses);
   if (status != 0) {
     char message[256];
@@ -32,24 +32,24 @@ int server_socket_listen(const char *host, unsigned short port, int backlog) {
   int last_error = EADDRNOTAVAIL;
   for (struct addrinfo *address = addresses; address != NULL;
        address = address->ai_next) {
-    int candidate = socket(address->ai_family, address->ai_socktype,
-                           address->ai_protocol);
-    if (candidate < 0) {
+    int sockfd =
+        socket(address->ai_family, address->ai_socktype, address->ai_protocol);
+    if (sockfd < 0) {
       last_error = errno;
       continue;
     }
 
     int enabled = 1;
-    (void)setsockopt(candidate, SOL_SOCKET, SO_REUSEADDR, &enabled,
+    (void)setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &enabled,
                      sizeof(enabled));
-    if (bind(candidate, address->ai_addr, address->ai_addrlen) == 0 &&
-        listen(candidate, backlog) == 0) {
-      listener = candidate;
+    if (bind(sockfd, address->ai_addr, address->ai_addrlen) == 0 &&
+        listen(sockfd, backlog) == 0) {
+      listener = sockfd;
       break;
     }
 
     last_error = errno;
-    close(candidate);
+    close(sockfd);
   }
   freeaddrinfo(addresses);
 
@@ -72,8 +72,8 @@ int server_socket_accept(int listener, struct sockaddr_storage *peer_address,
   int client;
   do {
     *peer_address_length = sizeof(*peer_address);
-    client = accept(listener, (struct sockaddr *)peer_address,
-                    peer_address_length);
+    client =
+        accept(listener, (struct sockaddr *)peer_address, peer_address_length);
   } while (client < 0 && errno == EINTR);
   return client;
 }

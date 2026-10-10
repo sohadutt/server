@@ -87,14 +87,22 @@ void resource_monitor_log_request(const ResourceUsageSnapshot *start,
   long long user_us = nonnegative_delta(end.user_cpu_us, start->user_cpu_us);
   long long system_us =
       nonnegative_delta(end.system_cpu_us, start->system_cpu_us);
+  long long wall_ms = wall_ns / 1000000LL;
+  long long wall_sub_ms = (wall_ns % 1000000LL) / 1000LL;
+  long long user_ms = user_us / 1000LL;
+  long long user_sub_ms = user_us % 1000LL;
+  long long system_ms = system_us / 1000LL;
+  long long system_sub_ms = system_us % 1000LL;
 
   char message[768];
   snprintf(message, sizeof(message),
-           "Request resources: request=\"%s\" wall=%.3fms user_cpu=%.3fms "
-           "system_cpu=%.3fms process_peak_rss=%lldKB minor_faults=%lld "
+           "Request resources: request=\"%s\" wall=%lld.%03lldms "
+           "user_cpu=%lld.%03lldms system_cpu=%lld.%03lldms "
+           "process_peak_rss=%lldKB minor_faults=%lld "
            "major_faults=%lld voluntary_context_switches=%lld "
            "involuntary_context_switches=%lld bytes_in=%zu bytes_out=%zu",
-           request, wall_ns / 1000000.0, user_us / 1000.0, system_us / 1000.0,
+           request, wall_ms, wall_sub_ms, user_ms, user_sub_ms, system_ms,
+           system_sub_ms,
            end.peak_rss_kb,
            nonnegative_delta(end.minor_page_faults, start->minor_page_faults),
            nonnegative_delta(end.major_page_faults, start->major_page_faults),

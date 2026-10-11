@@ -15,8 +15,10 @@ static size_t send_all(int socket_fd, const void *data, size_t length) {
 #endif
     ssize_t sent =
         send(socket_fd, bytes + sent_total, length - sent_total, flags);
-    if (sent < 0 && errno == EINTR) continue;
-    if (sent <= 0) break;
+    if (sent < 0 && errno == EINTR)
+      continue;
+    if (sent <= 0)
+      break;
     sent_total += (size_t)sent;
   }
   return sent_total;
@@ -31,8 +33,8 @@ size_t http_response_send(int client, int status_code,
                           const void *body, size_t body_length) {
   if (client < 0 || reason_phrase == NULL || content_type == NULL ||
       (body == NULL && body_length > 0) || status_code < 100 ||
-      status_code > 599 ||
-      has_line_break(reason_phrase) || has_line_break(content_type)) {
+      status_code > 599 || has_line_break(reason_phrase) ||
+      has_line_break(content_type)) {
     return 0;
   }
 
@@ -43,17 +45,18 @@ size_t http_response_send(int client, int status_code,
 #endif
 
   char headers[512];
-  int header_length = snprintf(headers, sizeof(headers),
-                               "HTTP/1.1 %d %s\r\n"
-                               "Content-Type: %s\r\n"
-                               "Content-Length: %zu\r\n"
-                               "Connection: close\r\n\r\n",
-                               status_code, reason_phrase, content_type,
-                               body_length);
-  if (header_length < 0 || (size_t)header_length >= sizeof(headers)) return 0;
+  int header_length =
+      snprintf(headers, sizeof(headers),
+               "HTTP/1.1 %d %s\r\n"
+               "Content-Type: %s\r\n"
+               "Content-Length: %zu\r\n"
+               "Connection: close\r\n\r\n",
+               status_code, reason_phrase, content_type, body_length);
+  if (header_length < 0 || (size_t)header_length >= sizeof(headers))
+    return 0;
 
-  size_t sent_headers =
-      send_all(client, headers, (size_t)header_length);
-  if (sent_headers != (size_t)header_length) return sent_headers;
+  size_t sent_headers = send_all(client, headers, (size_t)header_length);
+  if (sent_headers != (size_t)header_length)
+    return sent_headers;
   return sent_headers + send_all(client, body, body_length);
 }

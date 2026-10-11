@@ -14,7 +14,8 @@ int http_request_line_parse(const HttpRequest *request,
          request->data[line_length] != '\n') {
     line_length++;
   }
-  if (line_length == 0 || line_length >= HTTP_REQUEST_CAPACITY) return -1;
+  if (line_length == 0 || line_length >= HTTP_REQUEST_CAPACITY)
+    return -1;
 
   char line[HTTP_REQUEST_CAPACITY];
   memcpy(line, request->data, line_length);

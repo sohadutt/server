@@ -18,6 +18,7 @@ add_executable(http_server
     src/server/server.c
 
     src/static/static.c
+    src/static/mime_types.c
 
     src/utils/logger.c
     src/utils/resource_monitor.c

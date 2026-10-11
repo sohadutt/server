@@ -28,8 +28,9 @@ static void log_peer(const struct sockaddr *address, socklen_t address_length) {
 
 void connection_handle(int client, const struct sockaddr *peer_address,
                        socklen_t peer_address_length,
-                       const ServerConfig *config) {
-  if (client < 0 || config == NULL)
+                       const ServerConfig *config,
+                       const StaticFileServer *static_files) {
+  if (client < 0 || config == NULL || static_files == NULL)
     return;
   log_peer(peer_address, peer_address_length);
 
@@ -58,20 +59,28 @@ void connection_handle(int client, const struct sockaddr *peer_address,
   } else if (strcmp(request_line.method, "GET") != 0) {
     status_code = 405;
     reason_phrase = "Method Not Allowed";
-  } else if (static_file_load(config->document_root, request_line.target,
+  } else if (static_file_load(static_files, request_line.target,
                               &response_file) != 0) {
     status_code = 404;
     reason_phrase = "Not Found";
   }
 
-  if (status_code != 200 && static_file_load(config->document_root, "/404.html",
-                                             &response_file) != 0) {
+  if (status_code != 200 &&
+      static_file_load_not_found(static_files, &response_file) != 0) {
     log_error("Could not load the configured 404 page");
+  }
+
+  if (response_file.data != NULL) {
+    char message[512];
+    snprintf(message, sizeof(message), "Serving '%s' as %s (HTTP %d)",
+             response_file.relative_path, response_file.content_type,
+             status_code);
+    log_debug(message);
   }
 
   const char *content_type = response_file.content_type != NULL
                                  ? response_file.content_type
-                                 : "text/html; charset=utf-8";
+                                 : static_files->default_mime_type;
   size_t bytes_sent =
       http_response_send(client, status_code, reason_phrase, content_type,
                          response_file.data, response_file.length);

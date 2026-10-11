@@ -17,10 +17,16 @@ int server_start(const ServerConfig *config) {
     return -1;
   }
 
+  StaticFileServer static_files;
+  if (static_file_server_init(&static_files, config) != 0)
+    return -1;
+
   int listener = server_socket_listen(
       config->host, (unsigned short)config->port, SERVER_BACKLOG);
-  if (listener < 0)
+  if (listener < 0) {
+    static_file_server_destroy(&static_files);
     return -1;
+  }
 
   char message[160];
   snprintf(message, sizeof(message), "Server listening on %s:%d", config->host,
@@ -37,12 +43,13 @@ int server_start(const ServerConfig *config) {
       log_error("Failed to accept connection");
       if (accept_error == EBADF || accept_error == EINVAL) {
         close(listener);
+        static_file_server_destroy(&static_files);
         return -1;
       }
       continue;
     }
 
     connection_handle(client, (struct sockaddr *)&peer_address,
-                      peer_address_length, config);
+                      peer_address_length, config, &static_files);
   }
 }

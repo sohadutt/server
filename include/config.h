@@ -15,6 +15,11 @@ typedef struct ServerConfig {
 
   char log_directory[256];
   char document_root[256];
+  char index_file[128];
+  char not_found_page[128];
+  char mime_types_file[256];
+  char default_mime_type[128];
+  int max_static_file_size_mb;
 
 } ServerConfig;
 

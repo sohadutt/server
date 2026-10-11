@@ -7,15 +7,13 @@
 #include "config.h"
 
 static char *trim(char *value) {
-  while (*value == ' ' || *value == '\t' || *value == '\r' ||
-         *value == '\n') {
+  while (*value == ' ' || *value == '\t' || *value == '\r' || *value == '\n') {
     value++;
   }
 
   char *end = value + strlen(value);
-  while (end > value &&
-         (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r' ||
-          end[-1] == '\n')) {
+  while (end > value && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r' ||
+                         end[-1] == '\n')) {
     *--end = '\0';
   }
   return value;
@@ -54,8 +52,7 @@ static int parse_bool(const char *value, int *result) {
   return -1;
 }
 
-static int set_value(ServerConfig *config, const char *key,
-                     const char *value) {
+static int set_value(ServerConfig *config, const char *key, const char *value) {
   if (strcmp(key, "port") == 0) {
     return parse_int(value, 1, 65535, &config->port);
   }
@@ -69,16 +66,39 @@ static int set_value(ServerConfig *config, const char *key,
     return copy_value(config->document_root, sizeof(config->document_root),
                       value);
   }
+  if (strcmp(key, "index_file") == 0) {
+    return copy_value(config->index_file, sizeof(config->index_file), value);
+  }
+  if (strcmp(key, "not_found_page") == 0) {
+    return copy_value(config->not_found_page, sizeof(config->not_found_page),
+                      value);
+  }
+  if (strcmp(key, "mime_types_file") == 0) {
+    return copy_value(config->mime_types_file, sizeof(config->mime_types_file),
+                      value);
+  }
+  if (strcmp(key, "default_mime_type") == 0) {
+    return copy_value(config->default_mime_type,
+                      sizeof(config->default_mime_type), value);
+  }
+  if (strcmp(key, "max_static_file_size_mb") == 0) {
+    return parse_int(value, 1, 1024, &config->max_static_file_size_mb);
+  }
   if (strcmp(key, "log_directory") == 0) {
     return copy_value(config->log_directory, sizeof(config->log_directory),
                       value);
   }
   if (strcmp(key, "log_level") == 0) {
-    if (strcmp(value, "debug") == 0) config->log_level = LOG_DEBUG;
-    else if (strcmp(value, "info") == 0) config->log_level = LOG_INFO;
-    else if (strcmp(value, "warn") == 0) config->log_level = LOG_WARN;
-    else if (strcmp(value, "error") == 0) config->log_level = LOG_ERROR;
-    else return -1;
+    if (strcmp(value, "debug") == 0)
+      config->log_level = LOG_DEBUG;
+    else if (strcmp(value, "info") == 0)
+      config->log_level = LOG_INFO;
+    else if (strcmp(value, "warn") == 0)
+      config->log_level = LOG_WARN;
+    else if (strcmp(value, "error") == 0)
+      config->log_level = LOG_ERROR;
+    else
+      return -1;
     return 0;
   }
   if (strcmp(key, "log_console") == 0) {
@@ -91,7 +111,8 @@ static int set_value(ServerConfig *config, const char *key,
 }
 
 void config_defaults(ServerConfig *config) {
-  if (config == NULL) return;
+  if (config == NULL)
+    return;
   memset(config, 0, sizeof(*config));
   config->log_level = LOG_INFO;
   config->log_console = 1;
@@ -100,16 +121,25 @@ void config_defaults(ServerConfig *config) {
   config->worker_threads = 4;
   snprintf(config->host, sizeof(config->host), "%s", "0.0.0.0");
   snprintf(config->log_directory, sizeof(config->log_directory), "%s", "logs");
-  snprintf(config->document_root, sizeof(config->document_root), "%s", "public");
+  snprintf(config->document_root, sizeof(config->document_root), "%s",
+           "public");
+  snprintf(config->index_file, sizeof(config->index_file), "%s", "index.html");
+  snprintf(config->not_found_page, sizeof(config->not_found_page), "%s",
+           "404.html");
+  snprintf(config->mime_types_file, sizeof(config->mime_types_file), "%s",
+           "config/mime.types");
+  snprintf(config->default_mime_type, sizeof(config->default_mime_type), "%s",
+           "application/octet-stream");
+  config->max_static_file_size_mb = 64;
 }
 
 int config_load(const char *filename, ServerConfig *config) {
-  if (filename == NULL || config == NULL) return -1;
+  if (filename == NULL || config == NULL)
+    return -1;
 
   FILE *file = fopen(filename, "r");
   if (file == NULL) {
-    fprintf(stderr, "Cannot open config '%s': %s\n", filename,
-            strerror(errno));
+    fprintf(stderr, "Cannot open config '%s': %s\n", filename, strerror(errno));
     return -1;
   }
 
@@ -128,7 +158,8 @@ int config_load(const char *filename, ServerConfig *config) {
     }
 
     char *content = trim(line);
-    if (*content == '\0' || *content == '#') continue;
+    if (*content == '\0' || *content == '#')
+      continue;
 
     char *separator = strchr(content, '=');
     if (separator == NULL) {
@@ -154,6 +185,7 @@ int config_load(const char *filename, ServerConfig *config) {
   }
   fclose(file);
 
-  if (result == 0) *config = parsed;
+  if (result == 0)
+    *config = parsed;
   return result;
 }

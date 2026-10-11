@@ -4,9 +4,11 @@
 #include <sys/socket.h>
 
 #include "config.h"
+#include "static.h"
 
 void connection_handle(int client, const struct sockaddr *peer_address,
                        socklen_t peer_address_length,
-                       const ServerConfig *config);
+                       const ServerConfig *config,
+                       const StaticFileServer *static_files);
 
 #endif

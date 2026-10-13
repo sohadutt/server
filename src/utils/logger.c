@@ -90,6 +90,7 @@ int logger_init(const ServerConfig *config) {
   if (log_file == NULL) {
     fprintf(stderr, "Failed to open log file %s: %s\n", filename,
             strerror(errno));
+    perror("Failed to open log file: \n");
     return -1;
   }
 

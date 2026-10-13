@@ -3,6 +3,8 @@
 
 #include "logger.h"
 
+#include <stddef.h>
+
 typedef struct ServerConfig {
   LogLevel log_level;
 
@@ -21,6 +23,8 @@ typedef struct ServerConfig {
   char default_mime_type[128];
   int max_static_file_size_mb;
 
+  char cups_server[256];
+  int cups_encryption_required;
 } ServerConfig;
 
 void config_defaults(ServerConfig *config);

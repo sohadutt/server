@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.30)
 
 project(http_server VERSION 0.1.0 LANGUAGES C)
 
+find_package(Cups REQUIRED)
+
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_executable(http_server
@@ -20,13 +22,18 @@ add_executable(http_server
     src/static/static.c
     src/static/mime_types.c
 
+    src/printing/printing.c
+
     src/utils/logger.c
     src/utils/resource_monitor.c
 )
 
 target_include_directories(http_server PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CUPS_INCLUDE_DIRS}
 )
+
+target_link_libraries(http_server PRIVATE ${CUPS_LIBRARIES})
 
 set_target_properties(http_server PROPERTIES
     C_STANDARD "${CMAKE_C_STANDARD_LATEST}"

@@ -11,6 +11,7 @@ text text/plain
 csv text/csv
 xml application/xml
 pdf application/pdf
+ps application/postscript
 wasm application/wasm
 zip application/zip
 webmanifest application/manifest+json

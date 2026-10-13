@@ -84,6 +84,14 @@ static int set_value(ServerConfig *config, const char *key, const char *value) {
   if (strcmp(key, "max_static_file_size_mb") == 0) {
     return parse_int(value, 1, 1024, &config->max_static_file_size_mb);
   }
+  if (strcmp(key, "cups_server") == 0) {
+    if (value[0] == '\0')
+      return -1;
+    return copy_value(config->cups_server, sizeof(config->cups_server), value);
+  }
+  if (strcmp(key, "cups_encryption_required") == 0) {
+    return parse_bool(value, &config->cups_encryption_required);
+  }
   if (strcmp(key, "log_directory") == 0) {
     return copy_value(config->log_directory, sizeof(config->log_directory),
                       value);
@@ -131,6 +139,8 @@ void config_defaults(ServerConfig *config) {
   snprintf(config->default_mime_type, sizeof(config->default_mime_type), "%s",
            "application/octet-stream");
   config->max_static_file_size_mb = 64;
+  config->cups_server[0] = '\0';
+  config->cups_encryption_required = 0;
 }
 
 int config_load(const char *filename, ServerConfig *config) {

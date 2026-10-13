@@ -1,5 +1,7 @@
 #include <stdio.h>
 
+#include <cups/cups.h>
+
 #include "config.h"
 #include "logger.h"
 #include "server.h"
@@ -21,6 +23,13 @@ int main(int argc, char **argv) {
   if (logger_init(&config) != 0) {
     fprintf(stderr, "Error: logger_init failed\n");
     return 1;
+  }
+
+  if (config.cups_server[0] != '\0') {
+    cupsSetServer(config.cups_server);
+  }
+  if (config.cups_encryption_required) {
+    cupsSetEncryption(HTTP_ENCRYPTION_REQUIRED);
   }
 
   log_info("Starting Server");

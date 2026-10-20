@@ -8,6 +8,7 @@
 #include <cups/cups.h>
 
 #include "connection.h"
+#include "data.h"
 #include "logger.h"
 #include "socket.h"
 #include "thread_pool.h"
@@ -21,6 +22,7 @@ typedef struct {
   socklen_t peer_address_length;
   const ServerConfig *config;
   const StaticFileServer *static_files;
+  DataStore *data_store;
 } ConnectionTask;
 
 static void handle_connection_task(void *argument) {
@@ -38,7 +40,7 @@ static void handle_connection_task(void *argument) {
 
   connection_handle(task->client, (const struct sockaddr *)&task->peer_address,
                     task->peer_address_length, task->config,
-                    task->static_files);
+                    task->static_files, task->data_store);
   free(task);
 }
 
@@ -54,9 +56,17 @@ int server_start(const ServerConfig *config) {
   if (static_file_server_init(&static_files, config) != 0)
     return -1;
 
+  DataStore *data_store = data_store_open(config->database_path);
+  if (data_store == NULL) {
+    log_error("Could not open the configured user database");
+    static_file_server_destroy(&static_files);
+    return -1;
+  }
+
   int listener = server_socket_listen(
       config->host, (unsigned short)config->port, SERVER_BACKLOG);
   if (listener < 0) {
+    data_store_close(data_store);
     static_file_server_destroy(&static_files);
     return -1;
   }
@@ -67,6 +77,7 @@ int server_start(const ServerConfig *config) {
   if (workers == NULL) {
     log_error("Could not start the connection worker pool");
     close(listener);
+    data_store_close(data_store);
     static_file_server_destroy(&static_files);
     return -1;
   }
@@ -90,6 +101,7 @@ int server_start(const ServerConfig *config) {
       if (accept_error == EBADF || accept_error == EINVAL) {
         close(listener);
         thread_pool_destroy(workers);
+        data_store_close(data_store);
         static_file_server_destroy(&static_files);
         return -1;
       }
@@ -105,7 +117,8 @@ int server_start(const ServerConfig *config) {
                              .peer_address = peer_address,
                              .peer_address_length = peer_address_length,
                              .config = config,
-                             .static_files = &static_files};
+                             .static_files = &static_files,
+                             .data_store = data_store};
     if (thread_pool_submit(workers, handle_connection_task, task) != 0) {
       close(client);
       free(task);

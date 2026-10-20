@@ -1,5 +1,6 @@
 #include "print_api.h"
 
+#include <openssl/crypto.h>
 #include <cups/cups.h>
 #include <errno.h>
 #include <limits.h>
@@ -172,24 +173,12 @@ static int parse_headers(const HttpRequest *request,
   return content_length_seen ? 0 : -1;
 }
 
-static int constant_time_equal(const char *left, const char *right) {
-  size_t left_length = strlen(left);
-  size_t right_length = strlen(right);
-  size_t maximum = left_length > right_length ? left_length : right_length;
-  unsigned int difference = (unsigned int)(left_length ^ right_length);
-  for (size_t i = 0; i < maximum; i++) {
-    unsigned char a = i < left_length ? (unsigned char)left[i] : 0;
-    unsigned char b = i < right_length ? (unsigned char)right[i] : 0;
-    difference |= (unsigned int)(a ^ b);
-  }
-  return difference == 0;
-}
-
-static int authorized(const char *header, const char *configured_token) {
+static int bearer_token(const char *header, char token[256]) {
   static const char prefix[] = "Bearer ";
-  if (configured_token[0] == '\0' || strncasecmp(header, prefix, 7) != 0)
+  if (strncasecmp(header, prefix, 7) != 0 || strlen(header + 7) >= 256)
     return 0;
-  return constant_time_equal(header + 7, configured_token);
+  memcpy(token, header + 7, strlen(header + 7) + 1);
+  return token[0] != '\0';
 }
 
 static int parse_copies(const char *value, int *copies) {
@@ -424,18 +413,12 @@ static size_t json_escape(char *output, size_t capacity, const char *input) {
 }
 
 size_t print_api_handle(int client, const HttpRequest *request,
-                        const ServerConfig *config, size_t *bytes_received) {
+                        const ServerConfig *config, DataStore *data_store,
+                        size_t *bytes_received) {
   if (client < 0 || request == NULL || config == NULL)
     return 0;
   if (bytes_received != NULL)
     *bytes_received = request->length;
-
-  if (config->print_api_token[0] == '\0')
-    return send_json(client, 503, "Service Unavailable",
-                     "{\"error\":\"Printing is not configured\"}");
-  if (pthread_mutex_trylock(&print_submission_mutex) != 0)
-    return send_json(client, 503, "Service Unavailable",
-                     "{\"error\":\"A print request is already being processed\"}");
 
   size_t response_bytes = 0;
   PrintRequestHeaders headers = {0};
@@ -445,12 +428,15 @@ size_t print_api_handle(int client, const HttpRequest *request,
   const char *reason = NULL;
   int copies = 1;
   const char *media_type = NULL;
+  char token[256] = {0};
+  DataUser user = {0};
   if (parse_headers(request, &headers) != 0) {
     failure = "Malformed print request headers";
     status = 400;
     reason = "Bad Request";
-  } else if (!authorized(headers.authorization, config->print_api_token)) {
-    failure = "Valid bearer token required";
+  } else if (!bearer_token(headers.authorization, token) ||
+             data_token_authenticate(data_store, token, &user) != DATA_OK) {
+    failure = "Login with a valid phone number and password first";
     status = 401;
     reason = "Unauthorized";
   } else if (headers.content_length == 0 ||
@@ -467,6 +453,19 @@ size_t print_api_handle(int client, const HttpRequest *request,
     failure = "Supported formats are PDF, JPEG, and PNG";
     status = 415;
     reason = "Unsupported Media Type";
+  }
+
+  if (failure == NULL && pthread_mutex_trylock(&print_submission_mutex) != 0) {
+    OPENSSL_cleanse(token, sizeof(token));
+    return send_json(client, 503, "Service Unavailable",
+                     "{\"error\":\"A print request is already being processed\"}");
+  }
+  if (failure != NULL) {
+    char body[256];
+    snprintf(body, sizeof(body), "{\"error\":\"%s\"}", failure);
+    response_bytes = send_json(client, status, reason, body);
+    OPENSSL_cleanse(token, sizeof(token));
+    return response_bytes;
   }
 
   if (failure == NULL && parse_copies(headers.copies, &copies) != 0) {
@@ -542,5 +541,6 @@ size_t print_api_handle(int client, const HttpRequest *request,
     }
   }
   pthread_mutex_unlock(&print_submission_mutex);
+  OPENSSL_cleanse(token, sizeof(token));
   return response_bytes;
 }

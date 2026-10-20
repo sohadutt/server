@@ -1,6 +1,7 @@
 #include "data.h"
 
 #include <openssl/crypto.h>
+#include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <openssl/sha.h>
 #include <pthread.h>
@@ -25,6 +26,8 @@ static const char schema_sql[] =
     " phone_e164 TEXT NOT NULL UNIQUE,"
     " credits INTEGER NOT NULL DEFAULT 0 CHECK(credits >= 0),"
     " active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1)),"
+    " password_salt BLOB CHECK(password_salt IS NULL OR length(password_salt) = 16),"
+    " password_hash BLOB CHECK(password_hash IS NULL OR length(password_hash) = 32),"
     " created_at INTEGER NOT NULL"
     ");"
     "CREATE TABLE user_tokens ("
@@ -52,7 +55,7 @@ static const char schema_sql[] =
     " ON credit_ledger(user_id, reference) WHERE reference IS NOT NULL;"
     "CREATE INDEX credit_ledger_user_time"
     " ON credit_ledger(user_id, created_at DESC);"
-    "PRAGMA user_version = 1;";
+    "PRAGMA user_version = 2;";
 
 static int valid_phone(const char *phone) {
   if (phone == NULL || phone[0] != '+')
@@ -92,7 +95,10 @@ static void transaction_rollback(DataStore *store) {
 }
 
 static DataResult transaction_commit(DataStore *store) {
-  return execute_sql(store->database, "COMMIT;") == 0 ? DATA_OK : DATA_ERROR;
+  if (execute_sql(store->database, "COMMIT;") == 0)
+    return DATA_OK;
+  transaction_rollback(store);
+  return DATA_ERROR;
 }
 
 static void fill_user(sqlite3_stmt *statement, DataUser *user) {
@@ -183,8 +189,9 @@ static int create_token(char *token, size_t token_capacity,
 static int insert_token(DataStore *store, int64_t user_id,
                         const unsigned char digest[SHA256_DIGEST_LENGTH]) {
   static const char sql[] =
-      "INSERT INTO user_tokens(user_id, token_hash, created_at) "
-      "VALUES(?1, ?2, CAST(strftime('%s', 'now') AS INTEGER));";
+      "INSERT INTO user_tokens(user_id, token_hash, created_at, expires_at) "
+      "VALUES(?1, ?2, CAST(strftime('%s', 'now') AS INTEGER), "
+      "CAST(strftime('%s', 'now') AS INTEGER) + 2592000);";
   sqlite3_stmt *statement = NULL;
   int result = sqlite3_prepare_v2(store->database, sql, -1, &statement, NULL);
   if (result == SQLITE_OK)
@@ -211,13 +218,24 @@ static int schema_version(sqlite3 *database) {
 
 static int schema_initialize(sqlite3 *database) {
   int version = schema_version(database);
-  if (version == 1)
+  if (version == 2)
     return 0;
-  if (version != 0 || execute_sql(database, "BEGIN EXCLUSIVE;") != 0)
+  if ((version != 0 && version != 1) ||
+      execute_sql(database, "BEGIN EXCLUSIVE;") != 0)
     return -1;
   version = schema_version(database);
-  if (version == 1)
+  if (version == 2)
     return execute_sql(database, "COMMIT;");
+  if (version == 1) {
+    if (execute_sql(database,
+                    "ALTER TABLE users ADD COLUMN password_salt BLOB;"
+                    "ALTER TABLE users ADD COLUMN password_hash BLOB;"
+                    "PRAGMA user_version = 2;") != 0) {
+      (void)sqlite3_exec(database, "ROLLBACK;", NULL, NULL, NULL);
+      return -1;
+    }
+    return execute_sql(database, "COMMIT;");
+  }
   if (version != 0) {
     (void)sqlite3_exec(database, "ROLLBACK;", NULL, NULL, NULL);
     return -1;
@@ -236,6 +254,24 @@ static int schema_initialize(sqlite3 *database) {
 DataStore *data_store_open(const char *path) {
   if (path == NULL || path[0] == '\0')
     return NULL;
+  char parent[512];
+  size_t path_length = strlen(path);
+  if (path_length >= sizeof(parent))
+    return NULL;
+  memcpy(parent, path, path_length + 1);
+  char *slash = strrchr(parent, '/');
+  if (slash != NULL) {
+    *slash = '\0';
+    if (parent[0] != '\0') {
+      struct stat directory_status;
+      if (stat(parent, &directory_status) != 0) {
+        if (errno != ENOENT || mkdir(parent, S_IRWXU) != 0)
+          return NULL;
+      } else if (!S_ISDIR(directory_status.st_mode)) {
+        return NULL;
+      }
+    }
+  }
   struct stat file_status;
   if (lstat(path, &file_status) == 0) {
     if (!S_ISREG(file_status.st_mode))
@@ -411,6 +447,10 @@ DataResult data_user_set_active(DataStore *store, const char *phone_e164,
       (active != 0 && active != 1))
     return DATA_INVALID;
   pthread_mutex_lock(&store->mutex);
+  if (transaction_begin(store) != 0) {
+    pthread_mutex_unlock(&store->mutex);
+    return DATA_ERROR;
+  }
   sqlite3_stmt *statement = NULL;
   int result = sqlite3_prepare_v2(
       store->database, "UPDATE users SET active = ?1 WHERE phone_e164 = ?2;",
@@ -423,10 +463,322 @@ DataResult data_user_set_active(DataStore *store, const char *phone_e164,
     result = sqlite3_step(statement);
   int changed = sqlite3_changes(store->database);
   sqlite3_finalize(statement);
-  pthread_mutex_unlock(&store->mutex);
-  if (result != SQLITE_DONE)
+  if (result != SQLITE_DONE) {
+    transaction_rollback(store);
+    pthread_mutex_unlock(&store->mutex);
     return DATA_ERROR;
-  return changed == 1 ? DATA_OK : DATA_NOT_FOUND;
+  }
+  if (changed != 1) {
+    transaction_rollback(store);
+    pthread_mutex_unlock(&store->mutex);
+    return DATA_NOT_FOUND;
+  }
+  if (!active) {
+    result = sqlite3_prepare_v2(
+        store->database,
+        "UPDATE user_tokens SET revoked_at = "
+        "CAST(strftime('%s', 'now') AS INTEGER) WHERE user_id = "
+        "(SELECT id FROM users WHERE phone_e164 = ?1) AND revoked_at IS NULL;",
+        -1, &statement, NULL);
+    if (result == SQLITE_OK)
+      result = sqlite3_bind_text(statement, 1, phone_e164, -1, SQLITE_TRANSIENT);
+    if (result == SQLITE_OK)
+      result = sqlite3_step(statement);
+    sqlite3_finalize(statement);
+    if (result != SQLITE_DONE) {
+      transaction_rollback(store);
+      pthread_mutex_unlock(&store->mutex);
+      return DATA_ERROR;
+    }
+  }
+  DataResult status = transaction_commit(store);
+  pthread_mutex_unlock(&store->mutex);
+  return status;
+}
+
+#define PASSWORD_SALT_SIZE 16
+#define PASSWORD_HASH_SIZE 32
+#define PASSWORD_ITERATIONS 310000
+
+static int password_valid(const char *password) {
+  if (password == NULL)
+    return 0;
+  size_t length = strlen(password);
+  return length >= 8 && length <= 128;
+}
+
+static int password_hash(const char *password,
+                         const unsigned char salt[PASSWORD_SALT_SIZE],
+                         unsigned char hash[PASSWORD_HASH_SIZE]) {
+  return PKCS5_PBKDF2_HMAC(password, (int)strlen(password), salt,
+                            PASSWORD_SALT_SIZE, PASSWORD_ITERATIONS,
+                            EVP_sha256(), PASSWORD_HASH_SIZE, hash);
+}
+
+DataResult data_user_create_account(DataStore *store, const char *phone_e164,
+                                    const char *password, DataUser *user) {
+  if (store == NULL || user == NULL || !valid_phone(phone_e164) ||
+      !password_valid(password))
+    return DATA_INVALID;
+  unsigned char salt[PASSWORD_SALT_SIZE];
+  unsigned char hash[PASSWORD_HASH_SIZE];
+  if (RAND_bytes(salt, sizeof(salt)) != 1 ||
+      password_hash(password, salt, hash) != 1) {
+    OPENSSL_cleanse(salt, sizeof(salt));
+    OPENSSL_cleanse(hash, sizeof(hash));
+    return DATA_ERROR;
+  }
+  pthread_mutex_lock(&store->mutex);
+  DataResult status = DATA_ERROR;
+  if (transaction_begin(store) != 0)
+    goto create_done;
+  sqlite3_stmt *statement = NULL;
+  int result = sqlite3_prepare_v2(
+      store->database,
+      "INSERT INTO users(phone_e164, created_at, password_salt, password_hash) "
+      "VALUES(?1, CAST(strftime('%s', 'now') AS INTEGER), ?2, ?3);",
+      -1, &statement, NULL);
+  if (result == SQLITE_OK)
+    result = sqlite3_bind_text(statement, 1, phone_e164, -1, SQLITE_TRANSIENT);
+  if (result == SQLITE_OK)
+    result = sqlite3_bind_blob(statement, 2, salt, sizeof(salt), SQLITE_TRANSIENT);
+  if (result == SQLITE_OK)
+    result = sqlite3_bind_blob(statement, 3, hash, sizeof(hash), SQLITE_TRANSIENT);
+  if (result == SQLITE_OK)
+    result = sqlite3_step(statement);
+  sqlite3_finalize(statement);
+  if (result != SQLITE_DONE) {
+    status = map_sqlite_result(result);
+    transaction_rollback(store);
+    goto create_done;
+  }
+  status = query_user_by_phone(store, phone_e164, user);
+  if (status != DATA_OK) {
+    transaction_rollback(store);
+    goto create_done;
+  }
+  status = transaction_commit(store);
+
+create_done:
+  pthread_mutex_unlock(&store->mutex);
+  OPENSSL_cleanse(salt, sizeof(salt));
+  OPENSSL_cleanse(hash, sizeof(hash));
+  return status;
+}
+
+DataResult data_user_register(DataStore *store, const char *phone_e164,
+                              const char *password, char *token,
+                              size_t token_capacity, DataUser *user) {
+  if (store == NULL || user == NULL || !valid_phone(phone_e164) ||
+      !password_valid(password) || token == NULL ||
+      token_capacity < DATA_TOKEN_CAPACITY)
+    return DATA_INVALID;
+
+  unsigned char salt[PASSWORD_SALT_SIZE] = {0};
+  unsigned char hash[PASSWORD_HASH_SIZE] = {0};
+  unsigned char digest[SHA256_DIGEST_LENGTH] = {0};
+  char generated[DATA_TOKEN_CAPACITY] = {0};
+  if (RAND_bytes(salt, sizeof(salt)) != 1 ||
+      password_hash(password, salt, hash) != 1 ||
+      create_token(generated, sizeof(generated), digest) != 0) {
+    OPENSSL_cleanse(salt, sizeof(salt));
+    OPENSSL_cleanse(hash, sizeof(hash));
+    OPENSSL_cleanse(digest, sizeof(digest));
+    OPENSSL_cleanse(generated, sizeof(generated));
+    return DATA_ERROR;
+  }
+
+  pthread_mutex_lock(&store->mutex);
+  DataResult status = DATA_ERROR;
+  if (transaction_begin(store) != 0)
+    goto register_done;
+  sqlite3_stmt *statement = NULL;
+  int result = sqlite3_prepare_v2(
+      store->database,
+      "INSERT INTO users(phone_e164, created_at, password_salt, password_hash) "
+      "VALUES(?1, CAST(strftime('%s', 'now') AS INTEGER), ?2, ?3);",
+      -1, &statement, NULL);
+  if (result == SQLITE_OK)
+    result = sqlite3_bind_text(statement, 1, phone_e164, -1, SQLITE_TRANSIENT);
+  if (result == SQLITE_OK)
+    result = sqlite3_bind_blob(statement, 2, salt, sizeof(salt), SQLITE_TRANSIENT);
+  if (result == SQLITE_OK)
+    result = sqlite3_bind_blob(statement, 3, hash, sizeof(hash), SQLITE_TRANSIENT);
+  if (result == SQLITE_OK)
+    result = sqlite3_step(statement);
+  sqlite3_finalize(statement);
+  if (result != SQLITE_DONE) {
+    status = map_sqlite_result(result);
+    transaction_rollback(store);
+    goto register_done;
+  }
+
+  int64_t user_id = sqlite3_last_insert_rowid(store->database);
+  if (insert_token(store, user_id, digest) != SQLITE_OK) {
+    transaction_rollback(store);
+    goto register_done;
+  }
+  status = query_user_by_phone(store, phone_e164, user);
+  if (status != DATA_OK) {
+    transaction_rollback(store);
+    goto register_done;
+  }
+  status = transaction_commit(store);
+  if (status == DATA_OK)
+    memcpy(token, generated, sizeof(generated));
+
+register_done:
+  pthread_mutex_unlock(&store->mutex);
+  OPENSSL_cleanse(salt, sizeof(salt));
+  OPENSSL_cleanse(hash, sizeof(hash));
+  OPENSSL_cleanse(digest, sizeof(digest));
+  OPENSSL_cleanse(generated, sizeof(generated));
+  return status;
+}
+
+DataResult data_user_set_password(DataStore *store, const char *phone_e164,
+                                  const char *password) {
+  if (store == NULL || !valid_phone(phone_e164) || !password_valid(password))
+    return DATA_INVALID;
+  unsigned char salt[PASSWORD_SALT_SIZE];
+  unsigned char hash[PASSWORD_HASH_SIZE];
+  if (RAND_bytes(salt, sizeof(salt)) != 1 ||
+      password_hash(password, salt, hash) != 1) {
+    OPENSSL_cleanse(salt, sizeof(salt));
+    OPENSSL_cleanse(hash, sizeof(hash));
+    return DATA_ERROR;
+  }
+  pthread_mutex_lock(&store->mutex);
+  DataResult status = DATA_ERROR;
+  if (transaction_begin(store) != 0)
+    goto password_done;
+  sqlite3_stmt *statement = NULL;
+  int result = sqlite3_prepare_v2(
+      store->database,
+      "UPDATE users SET password_salt = ?1, password_hash = ?2 "
+      "WHERE phone_e164 = ?3;", -1, &statement, NULL);
+  if (result == SQLITE_OK)
+    result = sqlite3_bind_blob(statement, 1, salt, sizeof(salt), SQLITE_TRANSIENT);
+  if (result == SQLITE_OK)
+    result = sqlite3_bind_blob(statement, 2, hash, sizeof(hash), SQLITE_TRANSIENT);
+  if (result == SQLITE_OK)
+    result = sqlite3_bind_text(statement, 3, phone_e164, -1, SQLITE_TRANSIENT);
+  if (result == SQLITE_OK)
+    result = sqlite3_step(statement);
+  int changed = sqlite3_changes(store->database);
+  sqlite3_finalize(statement);
+  if (result != SQLITE_DONE || changed != 1) {
+    status = result == SQLITE_DONE ? DATA_NOT_FOUND : DATA_ERROR;
+    transaction_rollback(store);
+    goto password_done;
+  }
+  result = sqlite3_prepare_v2(
+      store->database,
+      "UPDATE user_tokens SET revoked_at = "
+      "CAST(strftime('%s', 'now') AS INTEGER) WHERE user_id = "
+      "(SELECT id FROM users WHERE phone_e164 = ?1) AND revoked_at IS NULL;",
+      -1, &statement, NULL);
+  if (result == SQLITE_OK)
+    result = sqlite3_bind_text(statement, 1, phone_e164, -1, SQLITE_TRANSIENT);
+  if (result == SQLITE_OK)
+    result = sqlite3_step(statement);
+  sqlite3_finalize(statement);
+  if (result != SQLITE_DONE) {
+    transaction_rollback(store);
+    goto password_done;
+  }
+  status = transaction_commit(store);
+
+password_done:
+  pthread_mutex_unlock(&store->mutex);
+  OPENSSL_cleanse(salt, sizeof(salt));
+  OPENSSL_cleanse(hash, sizeof(hash));
+  return status;
+}
+
+DataResult data_user_login(DataStore *store, const char *phone_e164,
+                          const char *password, char *token,
+                          size_t token_capacity, DataUser *user) {
+  if (store == NULL || !valid_phone(phone_e164) || !password_valid(password) ||
+      token == NULL || token_capacity < DATA_TOKEN_CAPACITY || user == NULL)
+    return DATA_INVALID;
+  unsigned char salt[PASSWORD_SALT_SIZE] = {0};
+  unsigned char expected[PASSWORD_HASH_SIZE] = {0};
+  unsigned char candidate[PASSWORD_HASH_SIZE] = {0};
+  unsigned char digest[SHA256_DIGEST_LENGTH] = {0};
+  char generated[DATA_TOKEN_CAPACITY] = {0};
+  if (create_token(generated, sizeof(generated), digest) != 0)
+    return DATA_ERROR;
+
+  pthread_mutex_lock(&store->mutex);
+  DataResult status = DATA_ERROR;
+  if (transaction_begin(store) != 0)
+    goto login_done;
+  sqlite3_stmt *statement = NULL;
+  int result = sqlite3_prepare_v2(
+      store->database,
+      "SELECT password_salt, password_hash, active FROM users "
+      "WHERE phone_e164 = ?1;", -1, &statement, NULL);
+  if (result == SQLITE_OK)
+    result = sqlite3_bind_text(statement, 1, phone_e164, -1, SQLITE_TRANSIENT);
+  if (result == SQLITE_OK)
+    result = sqlite3_step(statement);
+  int active = 0;
+  int has_password = 0;
+  if (result == SQLITE_ROW) {
+    const void *salt_blob = sqlite3_column_blob(statement, 0);
+    const void *hash_blob = sqlite3_column_blob(statement, 1);
+    if (salt_blob != NULL && hash_blob != NULL &&
+        sqlite3_column_bytes(statement, 0) == PASSWORD_SALT_SIZE &&
+        sqlite3_column_bytes(statement, 1) == PASSWORD_HASH_SIZE) {
+      memcpy(salt, salt_blob, sizeof(salt));
+      memcpy(expected, hash_blob, sizeof(expected));
+      has_password = 1;
+      active = sqlite3_column_int(statement, 2);
+    }
+  }
+  sqlite3_finalize(statement);
+  if (result != SQLITE_ROW && result != SQLITE_DONE) {
+    status = DATA_ERROR;
+    transaction_rollback(store);
+    goto login_done;
+  }
+  int hashed = password_hash(password, salt, candidate);
+  int matches = hashed == 1 &&
+                CRYPTO_memcmp(candidate, expected, sizeof(expected)) == 0;
+  if (!has_password || !active || !matches) {
+    status = DATA_UNAUTHORIZED;
+    transaction_rollback(store);
+    goto login_done;
+  }
+  DataUser authenticated = {0};
+  status = query_user_by_phone(store, phone_e164, &authenticated);
+  if (status != DATA_OK || !authenticated.active) {
+    transaction_rollback(store);
+    if (status == DATA_OK)
+      status = DATA_UNAUTHORIZED;
+    goto login_done;
+  }
+  int inserted = insert_token(store, authenticated.id, digest);
+  if (inserted != SQLITE_OK) {
+    status = map_sqlite_result(inserted);
+    transaction_rollback(store);
+    goto login_done;
+  }
+  status = transaction_commit(store);
+  if (status == DATA_OK) {
+    *user = authenticated;
+    memcpy(token, generated, sizeof(generated));
+  }
+
+login_done:
+  pthread_mutex_unlock(&store->mutex);
+  OPENSSL_cleanse(salt, sizeof(salt));
+  OPENSSL_cleanse(expected, sizeof(expected));
+  OPENSSL_cleanse(candidate, sizeof(candidate));
+  OPENSSL_cleanse(digest, sizeof(digest));
+  OPENSSL_cleanse(generated, sizeof(generated));
+  return status;
 }
 
 DataResult data_token_issue(DataStore *store, const char *phone_e164,

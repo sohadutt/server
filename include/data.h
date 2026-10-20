@@ -42,8 +42,19 @@ DataResult data_user_list(DataStore *store, DataUser **users, size_t *count);
 void data_user_list_free(DataUser *users);
 DataResult data_user_set_active(DataStore *store, const char *phone_e164,
                                 int active);
+/* Passwords are salted PBKDF2-HMAC-SHA256 hashes; plaintext is never stored. */
+DataResult data_user_set_password(DataStore *store, const char *phone_e164,
+                                  const char *password);
+DataResult data_user_create_account(DataStore *store, const char *phone_e164,
+                                    const char *password, DataUser *user);
+DataResult data_user_register(DataStore *store, const char *phone_e164,
+                              const char *password, char *token,
+                              size_t token_capacity, DataUser *user);
+DataResult data_user_login(DataStore *store, const char *phone_e164,
+                          const char *password, char *token,
+                          size_t token_capacity, DataUser *user);
 
-/* Tokens are random bearer credentials returned once; only SHA-256 digests are stored. */
+/* Random bearer sessions expire after 30 days; only SHA-256 digests are stored. */
 DataResult data_token_issue(DataStore *store, const char *phone_e164,
                             char *token, size_t token_capacity);
 DataResult data_token_revoke(DataStore *store, const char *phone_e164,

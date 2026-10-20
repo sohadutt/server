@@ -2,8 +2,8 @@
 
 A small C HTTP server with separate modules for configuration, TCP sockets,
 connections, HTTP requests and responses, static files, CUPS printer discovery, logging,
-and resource monitoring. Requests are limited to 4,095 bytes, including headers
-and any request body.
+and resource monitoring. Request headers and buffered login JSON are bounded;
+document uploads are streamed with a 64 MiB limit.
 
 ## Build
 
@@ -53,7 +53,7 @@ directly exposed in TLS mode. The script writes its private generated server
 config and Caddyfile under `build/local-tls/`; Ctrl-C stops both processes.
 If the browser does not trust Caddy's local certificate, run `caddy trust`
 once with the permissions required by your operating system. The token in
-`print_api_token` is copied into that generated config with owner-only file
+`admin_api_token` is copied into that generated config with owner-only file
 permissions.
 
 The local Caddy setup is for development on the same machine. For a public
@@ -95,7 +95,8 @@ directory unless they are absolute paths.
 | `max_static_file_size_mb` | `64` | `1`–`256` |
 | `cups_server` | system default | Host name or IP, optionally followed by a port |
 | `cups_encryption_required` | `false` | `true`, `false`, `1`, `0` |
-| `print_api_token` | disabled | Private bearer token, 32–255 characters |
+| `database_path` | `data/printing.sqlite` | SQLite database file path |
+| `admin_api_token` | disabled | Admin bearer secret, 32–255 characters |
 | `log_level` | `info` | `debug`, `info`, `warn`, `error` |
 | `log_console` | `true` | `true`, `false`, `1`, `0` |
 | `log_file` | `true` | `true`, `false`, `1`, `0` |
@@ -182,51 +183,115 @@ the scheduler; they do not configure printer hardware or CUPS itself.
 
 ## User, token, and credit storage
 
-`include/data.h` and `src/storage/data.c` provide a SQLite storage module. It
-creates the schema on first open and stores E.164 phone IDs, active status,
-credit balances, token digests, and an append-only credit ledger. Build now
-links SQLite and OpenSSL Crypto for persistence and secure token generation.
+`include/data.h` and `src/storage/data.c` provide the SQLite account and credit
+storage. It stores E.164 phone IDs, active status, PBKDF2-HMAC-SHA256 password
+hashes, token digests, credit balances, and an append-only credit ledger. The
+schema migrates existing version 1 databases automatically.
 
-The module returns a newly generated bearer token only when creating or issuing
-it. The database stores only its SHA-256 digest. Keep the returned token
-private; it cannot be recovered from the database. Deactivating a user blocks
-their tokens while retaining their account and ledger history. Revoke or
-replace credentials rather than storing raw token strings.
+The token API returns a newly generated bearer token only when issuing it. The
+database stores only its SHA-256 digest. Keep the returned token private; it
+cannot be recovered from the database. Sessions expire after 30 days.
+Deactivating a user blocks their tokens while retaining their account and
+ledger history.
 
 Balances use signed 64-bit integer credit units, never floating-point money.
 `data_credit_add()` should only be called after a future payment flow has
 verified a payment, and `data_credit_charge()` atomically checks and debits a
 balance. A non-null reference is unique per user, so retries of a payment or
 print charge can be detected instead of applying the same ledger event twice.
-The module does not process payments, choose a price per page, or connect user
-accounts and credits to `/api/print` yet. Those rules and authorization flow
-can be added when you define how payments and print charges should behave.
+The module does not process payments, choose a price per page, or deduct credits
+for print jobs. Define print pricing and payment verification before enabling
+credit charging in a job workflow.
 
-The caller opens a private database path and closes the store after all worker
-operations have finished. For example, pass `data/printing.sqlite` after
-creating the `data` directory with owner-only permissions. SQLite uses WAL,
+The server opens `database_path` at startup and creates its immediate parent
+directory with owner-only permissions if it is missing. SQLite uses WAL,
 foreign keys, a busy timeout, full synchronous writes, secure deletion, and
 0600 permissions on the database file.
 
-```sh
-mkdir -m 700 data
-```
-
-`data_user_create()` creates the phone-number account and returns its initial
-token once. `data_user_list()` enumerates accounts, `data_token_authenticate()`
-resolves an active token to its user and current balance, and token revocation
-can revoke one token or all of a user's tokens. A future payment handler can
-call `data_credit_add()` after verifying a provider transaction; print submission can call
-`data_credit_charge()` with a stable job reference before accepting a job.
-Those application flows are intentionally not wired into the HTTP route yet.
+`data_user_create_account()` creates an account with its password. The admin
+HTTP route can create users and reset passwords. Resetting a password revokes
+all of that user's current sessions. `data_token_authenticate()` resolves an
+active session to its user and current balance.
 
 ## Browser printing and upload API
 
-Set `print_api_token` in `config/server.conf` to a private random value of at
-least 32 characters to enable print submissions. For example, generate one
-with `openssl rand -hex 32`; do not commit or share the value. The print page
-asks for the token and keeps it in the current browser tab's session storage.
-Without a configured token, `/api/print` returns `503` and does not accept jobs.
+The local administrator script opens the SQLite database named by
+`database_path` in `config/server.conf` directly. It does not connect to the
+server or ask for an API secret. The script provides account lookup and
+listing, creation, password reset, user-token issue/revocation, credit
+additions, and account activation/blocklisting. Blocklisting deactivates the
+account and revokes its active sessions. It also has a direct SQL console; every SQL
+statement that changes data requires typing `APPLY` before the transaction is
+committed. The service's user ID is the E.164 phone number.
+
+Run it from the project directory with Python 3:
+
+```sh
+python3 scripts/admin_cli.py
+```
+
+To manage another existing database file, pass its path:
+
+```sh
+python3 scripts/admin_cli.py data/server.sqlite
+```
+
+This is an offline local tool, so access is controlled by the operating
+system account that can read and write the database file. Run it only on a
+trusted machine and keep the project `data` directory private. The server's
+HTTP admin routes remain separately protected by `admin_api_token`; that
+setting is not used by this script.
+
+For remote administration through the HTTP routes, set `admin_api_token` in
+`config/server.conf` to a private random value of at least 32 characters.
+Generate one with `openssl rand -hex 32`; keep it private and do not commit it.
+Admin requests use `Authorization: Bearer <admin-secret>`.
+
+Create an account as an administrator:
+
+```sh
+curl --fail-with-body -X POST http://localhost:8080/api/admin/users \
+  -H 'Authorization: Bearer YOUR_ADMIN_SECRET' \
+  -H 'Content-Type: application/json' \
+  -d '{"phone":"+14155550123","password":"use-a-unique-password"}'
+```
+
+Reset a forgotten password as an administrator:
+
+```sh
+curl --fail-with-body -X POST http://localhost:8080/api/admin/users/password \
+  -H 'Authorization: Bearer YOUR_ADMIN_SECRET' \
+  -H 'Content-Type: application/json' \
+  -d '{"phone":"+14155550123","new_password":"another-unique-password"}'
+```
+
+Passwords must contain 8–128 characters. Reset invalidates the user's existing
+sessions. Admin secrets and user passwords must only be sent over HTTPS outside
+local development.
+
+The print page at `/print/` supports signup and sign-in using a phone number and
+password. Signup creates the account and session atomically. Login returns a
+random session token; the browser stores it only in tab session storage and
+uses it for print requests. `GET /api/me` returns the signed-in
+phone and balance. `POST /api/logout` revokes the current session. The print
+endpoint requires an active user session. Sessions expire after 30 days.
+Phone ownership is not verified yet. Add SMS verification before using open
+signup where an account must be tied to a confirmed phone number.
+
+| Route | Method | Purpose |
+| --- | --- | --- |
+| `/api/signup` | `POST` | Creates an account from `phone` and `password`, then returns a session |
+| `/api/login` | `POST` | Accepts `{"phone":"+14155550123","password":"..."}` and returns a session token and balance |
+| `/api/me` | `GET` | Returns the signed-in phone and current balance |
+| `/api/logout` | `POST` | Revokes the current user session |
+| `/api/admin/users` | `POST` | Admin-only account creation with phone and password |
+| `/api/admin/users/password` | `POST` | Admin-only password reset; revokes all sessions |
+| `/api/admin/users/lookup` | `POST` | Admin-only lookup by phone ID |
+| `/api/admin/users/token` | `POST` | Issues a one-time, 30-day user token |
+| `/api/admin/users/revoke` | `POST` | Revokes every session for the phone ID |
+| `/api/admin/users/credits` | `POST` | Adds credits with a ledger entry and optional unique reference |
+| `/api/admin/users/active` | `POST` | Activates/deactivates an account; deactivation revokes sessions |
+| `/api/print` | `POST` | Submits a document using the signed-in user's bearer token |
 
 `POST /api/print` takes the document as the raw request body (not base64 or a
 JSON manifest). It accepts PDF, JPEG, and PNG uploads up to 64 MiB. The request
@@ -246,7 +311,7 @@ printer and CUPS job ID. Example:
 
 ```sh
 curl --fail-with-body \
-  -H 'Authorization: Bearer YOUR_PRIVATE_TOKEN' \
+  -H 'Authorization: Bearer USER_SESSION_TOKEN' \
   -H 'Content-Type: application/pdf' \
   -H 'X-Print-Copies: 2' \
   -H 'X-Print-Sides: two-sided-long-edge' \
@@ -269,13 +334,14 @@ The active request path is:
    bounded worker pool.
 3. `network/socket.c` owns TCP listen and accept operations.
 4. `server/connection.c` handles one client connection.
-5. `http/request.c` reads and logs the request; `http/parser.c` parses its request line.
-6. `static/static.c` resolves files under the document root, and
+5. `server/api.c` handles login, session, admin account, and print routes.
+6. `http/request.c` reads and logs the request; `http/parser.c` parses its request line.
+7. `static/static.c` resolves files under the document root, and
    `static/mime_types.c` maps extensions to media types.
-7. `http/response.c` writes the selected file and status to the client.
-8. `utils/resource_monitor.c` records per-request metrics in debug mode.
-9. `storage/data.c` provides the SQLite user, token, and credit-ledger module
-   for future account and billing integration.
+8. `http/response.c` writes the selected file and status to the client.
+9. `utils/resource_monitor.c` records per-request metrics in debug mode.
+10. `storage/data.c` provides the SQLite user, session, password, and
+    credit-ledger storage.
 
 Headers in `include/` define the interfaces between these modules. The HTTP
 coordinator, network buffer and event loop, router, and TLS files are scaffolding

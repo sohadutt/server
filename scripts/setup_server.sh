@@ -58,7 +58,7 @@ if (( ! tls )); then
   exec "$project_dir/build/http_server" "$config_file"
 fi
 
-# The generated config may contain the print bearer token, so keep it private.
+# The generated config may contain the admin credential, so keep it private.
 umask 077
 tls_dir="$project_dir/build/local-tls"
 mkdir -p "$tls_dir"

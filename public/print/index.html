@@ -18,11 +18,32 @@
         assign an available printer for you.</p>
     </header>
 
-    <form id="print-form" class="print-card">
-      <label class="field-label" for="token">Access token</label>
-      <input id="token" name="token" type="password" autocomplete="current-password"
-             placeholder="Your print access token" required>
-      <p class="hint">Your token is kept in this browser tab only.</p>
+    <form id="login-form" class="print-card">
+      <h2 id="auth-title">Sign in</h2>
+      <p id="auth-hint" class="hint">Use the phone number and password provided for your account.</p>
+      <label class="field-label" for="phone">Phone number</label>
+      <input id="phone" name="phone" type="tel" autocomplete="tel"
+             placeholder="+14155550123" inputmode="tel" maxlength="16"
+             pattern="\+[1-9][0-9]{7,14}" required>
+      <label class="field-label spaced" for="password">Password</label>
+      <input id="password" name="password" type="password"
+             autocomplete="current-password" minlength="8" maxlength="128" required>
+      <label id="confirm-label" class="field-label spaced" for="confirm-password" hidden>Confirm password</label>
+      <input id="confirm-password" name="confirm-password" type="password"
+             autocomplete="new-password" minlength="8" maxlength="128" hidden>
+      <p id="signup-note" class="hint" hidden>Phone numbers are not verified yet. Sign up only with a number you control.</p>
+      <button id="login-submit" type="submit">Sign in</button>
+      <p class="auth-switch"><span id="switch-prompt">New here?</span>
+        <button id="auth-toggle" class="text-button" type="button">Create account</button></p>
+      <p id="login-status" class="status" role="status" aria-live="polite"></p>
+    </form>
+
+    <form id="print-form" class="print-card" hidden>
+      <div class="account-bar">
+        <div><span class="account-label">SIGNED IN</span><strong id="account-phone"></strong>
+          <span class="balance" id="account-balance"></span></div>
+        <button id="logout" class="secondary" type="button">Sign out</button>
+      </div>
 
       <label class="field-label file-label" for="document">Document</label>
       <input id="document" name="document" type="file"
@@ -52,7 +73,7 @@
       <button id="submit" type="submit">Send to printer</button>
       <p id="status" class="status" role="status" aria-live="polite"></p>
     </form>
-    <footer>Files are submitted to the configured CUPS print service.</footer>
+    <footer>Files are sent to an available printer through the configured CUPS service.</footer>
   </main>
 </body>
 </html>

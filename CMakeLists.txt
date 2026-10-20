@@ -20,6 +20,7 @@ add_executable(http_server
 
     src/server/config.c
     src/server/connection.c
+    src/server/api.c
     src/server/print_api.c
     src/server/server.c
 

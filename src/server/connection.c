@@ -1,5 +1,7 @@
 #include "connection.h"
 
+#include "api.h"
+
 #include <netdb.h>
 #include <stdio.h>
 #include <string.h>
@@ -31,7 +33,8 @@ static void log_peer(const struct sockaddr *address, socklen_t address_length) {
 void connection_handle(int client, const struct sockaddr *peer_address,
                        socklen_t peer_address_length,
                        const ServerConfig *config,
-                       const StaticFileServer *static_files) {
+                       const StaticFileServer *static_files,
+                       DataStore *data_store) {
   if (client < 0)
     return;
   if (config == NULL || static_files == NULL) {
@@ -67,18 +70,12 @@ void connection_handle(int client, const struct sockaddr *peer_address,
   HttpRequestLine request_line = {0};
   int request_line_valid =
       read_result > 0 && http_request_line_parse(&request, &request_line) == 0;
-  if (request_line_valid && strcmp(request_line.target, "/api/print") == 0) {
+  if (request_line_valid && strncmp(request_line.target, "/api/", 5) == 0) {
     size_t bytes_sent = 0;
     size_t api_bytes_received = request.length;
-    if (strcmp(request_line.method, "POST") == 0) {
-      bytes_sent = print_api_handle(client, &request, config,
-                                    &api_bytes_received);
-    } else {
-      static const char body[] = "{\"error\":\"Use POST to submit a print job\"}";
-      bytes_sent = http_response_send(client, 405, "Method Not Allowed",
-                                      "application/json; charset=utf-8", body,
-                                      sizeof(body) - 1);
-    }
+    (void)api_handle_request(client, &request, request_line.method,
+                             request_line.target, config, data_store,
+                             &api_bytes_received, &bytes_sent);
     if (monitor_request) {
       resource_monitor_log_request(&request_start, request.data,
                                    api_bytes_received, bytes_sent);

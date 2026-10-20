@@ -92,11 +92,14 @@ static int set_value(ServerConfig *config, const char *key, const char *value) {
   if (strcmp(key, "cups_encryption_required") == 0) {
     return parse_bool(value, &config->cups_encryption_required);
   }
-  if (strcmp(key, "print_api_token") == 0) {
-    if (strlen(value) < 32 || strlen(value) >= sizeof(config->print_api_token))
+  if (strcmp(key, "database_path") == 0) {
+    return copy_value(config->database_path, sizeof(config->database_path), value);
+  }
+  if (strcmp(key, "admin_api_token") == 0) {
+    if (strlen(value) < 32 || strlen(value) >= sizeof(config->admin_api_token))
       return -1;
-    return copy_value(config->print_api_token,
-                      sizeof(config->print_api_token), value);
+    return copy_value(config->admin_api_token,
+                      sizeof(config->admin_api_token), value);
   }
   if (strcmp(key, "log_directory") == 0) {
     return copy_value(config->log_directory, sizeof(config->log_directory),
@@ -147,6 +150,8 @@ void config_defaults(ServerConfig *config) {
   config->max_static_file_size_mb = 64;
   config->cups_server[0] = '\0';
   config->cups_encryption_required = 0;
+  snprintf(config->database_path, sizeof(config->database_path), "%s",
+           "data/printing.sqlite");
 }
 
 int config_load(const char *filename, ServerConfig *config) {

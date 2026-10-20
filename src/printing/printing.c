@@ -2,9 +2,12 @@
 #include "logger.h"
 
 #include <cups/cups.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define PRINT_SERVICE_MAX_PRINTERS 4096U
 
 static char *copy_string(const char *value) {
   if (value == NULL) {
@@ -207,6 +210,12 @@ static int store_discovered_dest(PrintService *service,
     return 0;
   }
 
+  if (service->count >= PRINT_SERVICE_MAX_PRINTERS ||
+      service->count >= SIZE_MAX / sizeof(*service->printers)) {
+    printer_free(&printer);
+    return -1;
+  }
+
   Printer *printers =
       realloc(service->printers, (service->count + 1) * sizeof(*printers));
   if (printers == NULL) {
@@ -288,6 +297,13 @@ int get_printers(PrintService *service) {
 
   if (num_dests < 0) {
     log_error("Failed to retrieve printers");
+    return -1;
+  }
+
+  if ((size_t)num_dests > PRINT_SERVICE_MAX_PRINTERS ||
+      (size_t)num_dests > SIZE_MAX / sizeof(Printer)) {
+    cupsFreeDests(num_dests, dests);
+    log_error("CUPS returned too many configured printers");
     return -1;
   }
 

@@ -3,7 +3,8 @@
 .cache
 build
 logs
-
+data/
+certs
 # Object files
 *.o
 *.ko

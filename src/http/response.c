@@ -49,6 +49,7 @@ size_t http_response_send(int client, int status_code,
       snprintf(headers, sizeof(headers),
                "HTTP/1.1 %d %s\r\n"
                "Content-Type: %s\r\n"
+               "X-Content-Type-Options: nosniff\r\n"
                "Content-Length: %zu\r\n"
                "Connection: close\r\n\r\n",
                status_code, reason_phrase, content_type, body_length);

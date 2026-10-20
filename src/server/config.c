@@ -60,7 +60,7 @@ static int set_value(ServerConfig *config, const char *key, const char *value) {
     return copy_value(config->host, sizeof(config->host), value);
   }
   if (strcmp(key, "worker_threads") == 0) {
-    return parse_int(value, 1, 1024, &config->worker_threads);
+    return parse_int(value, 1, 64, &config->worker_threads);
   }
   if (strcmp(key, "document_root") == 0) {
     return copy_value(config->document_root, sizeof(config->document_root),
@@ -82,7 +82,7 @@ static int set_value(ServerConfig *config, const char *key, const char *value) {
                       sizeof(config->default_mime_type), value);
   }
   if (strcmp(key, "max_static_file_size_mb") == 0) {
-    return parse_int(value, 1, 1024, &config->max_static_file_size_mb);
+    return parse_int(value, 1, 256, &config->max_static_file_size_mb);
   }
   if (strcmp(key, "cups_server") == 0) {
     if (value[0] == '\0')
@@ -91,6 +91,12 @@ static int set_value(ServerConfig *config, const char *key, const char *value) {
   }
   if (strcmp(key, "cups_encryption_required") == 0) {
     return parse_bool(value, &config->cups_encryption_required);
+  }
+  if (strcmp(key, "print_api_token") == 0) {
+    if (strlen(value) < 32 || strlen(value) >= sizeof(config->print_api_token))
+      return -1;
+    return copy_value(config->print_api_token,
+                      sizeof(config->print_api_token), value);
   }
   if (strcmp(key, "log_directory") == 0) {
     return copy_value(config->log_directory, sizeof(config->log_directory),

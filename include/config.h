@@ -25,6 +25,7 @@ typedef struct ServerConfig {
 
   char cups_server[256];
   int cups_encryption_required;
+  char print_api_token[256];
 } ServerConfig;
 
 void config_defaults(ServerConfig *config);

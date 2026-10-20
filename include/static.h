@@ -10,6 +10,7 @@ struct ServerConfig;
 #define STATIC_ROOT_CAPACITY 4096
 #define STATIC_INDEX_CAPACITY 128
 typedef struct StaticFileServer {
+  int document_root_fd;
   char document_root[STATIC_ROOT_CAPACITY];
   char index_file[STATIC_INDEX_CAPACITY];
   char not_found_page[STATIC_INDEX_CAPACITY];
@@ -21,6 +22,7 @@ typedef struct StaticFileServer {
 typedef struct StaticFile {
   unsigned char *data;
   size_t length;
+  size_t memory_charge;
   const char *content_type;
   char relative_path[STATIC_ROOT_CAPACITY];
 } StaticFile;
@@ -29,7 +31,7 @@ typedef struct StaticFile {
 int static_file_server_init(StaticFileServer *server,
                             const struct ServerConfig *config);
 void static_file_server_destroy(StaticFileServer *server);
-/* On success, file owns a buffer that must be released with static_file_release. */
+/* Pass a zero-initialized/empty file; release its owned buffer before reuse. */
 int static_file_load(const StaticFileServer *server, const char *request_target,
                      StaticFile *file);
 int static_file_load_not_found(const StaticFileServer *server,

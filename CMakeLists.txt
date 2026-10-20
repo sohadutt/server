@@ -3,6 +3,9 @@ cmake_minimum_required(VERSION 3.30)
 project(http_server VERSION 0.1.0 LANGUAGES C)
 
 find_package(Cups REQUIRED)
+find_package(Threads REQUIRED)
+find_package(SQLite3 REQUIRED)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -17,12 +20,15 @@ add_executable(http_server
 
     src/server/config.c
     src/server/connection.c
+    src/server/print_api.c
     src/server/server.c
 
     src/static/static.c
     src/static/mime_types.c
 
     src/printing/printing.c
+    src/storage/data.c
+    src/workers/thread_pool.c
 
     src/utils/logger.c
     src/utils/resource_monitor.c
@@ -33,7 +39,12 @@ target_include_directories(http_server PRIVATE
     ${CUPS_INCLUDE_DIRS}
 )
 
-target_link_libraries(http_server PRIVATE ${CUPS_LIBRARIES})
+target_link_libraries(http_server PRIVATE
+    ${CUPS_LIBRARIES}
+    Threads::Threads
+    SQLite3::SQLite3
+    OpenSSL::Crypto
+)
 
 set_target_properties(http_server PROPERTIES
     C_STANDARD "${CMAKE_C_STANDARD_LATEST}"

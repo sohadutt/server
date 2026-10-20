@@ -16,9 +16,20 @@ int resource_monitor_capture(ResourceUsageSnapshot *snapshot) {
 
   struct timespec wall_time;
   struct rusage usage;
+  struct rusage process_usage;
+#ifdef RUSAGE_THREAD
+  int usage_scope = RUSAGE_THREAD;
+#else
+  int usage_scope = RUSAGE_SELF;
+#endif
   if (clock_gettime(CLOCK_MONOTONIC, &wall_time) != 0 ||
-      getrusage(RUSAGE_SELF, &usage) != 0) {
+      getrusage(usage_scope, &usage) != 0 ||
+      (usage_scope != RUSAGE_SELF &&
+       getrusage(RUSAGE_SELF, &process_usage) != 0)) {
     return -1;
+  }
+  if (usage_scope == RUSAGE_SELF) {
+    process_usage = usage;
   }
 
   snapshot->wall_time_ns =
@@ -26,9 +37,9 @@ int resource_monitor_capture(ResourceUsageSnapshot *snapshot) {
   snapshot->user_cpu_us = timeval_to_microseconds(&usage.ru_utime);
   snapshot->system_cpu_us = timeval_to_microseconds(&usage.ru_stime);
 #ifdef __APPLE__
-  snapshot->peak_rss_kb = usage.ru_maxrss / 1024;
+  snapshot->peak_rss_kb = process_usage.ru_maxrss / 1024;
 #else
-  snapshot->peak_rss_kb = usage.ru_maxrss;
+  snapshot->peak_rss_kb = process_usage.ru_maxrss;
 #endif
   snapshot->minor_page_faults = usage.ru_minflt;
   snapshot->major_page_faults = usage.ru_majflt;

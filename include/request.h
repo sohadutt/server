@@ -12,6 +12,8 @@ typedef struct HttpRequest {
 
 /* Returns 1 when data was received, 0 on end-of-stream, and -1 on error. */
 int http_request_receive(int client, HttpRequest *request);
+/* True when the request has valid headers and no unsupported body framing. */
+int http_request_is_bodyless(const HttpRequest *request);
 void http_request_log_debug(const HttpRequest *request);
 
 #endif

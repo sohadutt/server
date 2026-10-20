@@ -2,11 +2,15 @@
 
 #include "static.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "config.h"
 #include "logger.h"
@@ -15,8 +19,49 @@
 #define PATH_MAX 4096
 #endif
 
-#define STATIC_FILE_MAX_SIZE (1024ULL * 1024ULL * 1024ULL)
+#define STATIC_FILE_MEMORY_BUDGET (256ULL * 1024ULL * 1024ULL)
+#define STATIC_FILE_MAX_SIZE STATIC_FILE_MEMORY_BUDGET
 #define BYTES_PER_MEGABYTE (1024ULL * 1024ULL)
+
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 0
+#endif
+#ifndef O_NOFOLLOW
+#error "Static file serving requires O_NOFOLLOW support"
+#endif
+
+static pthread_mutex_t file_memory_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t file_memory_available = PTHREAD_COND_INITIALIZER;
+static size_t file_memory_in_use;
+
+static int reserve_file_memory(size_t amount) {
+  pthread_mutex_lock(&file_memory_mutex);
+  if ((unsigned long long)amount > STATIC_FILE_MEMORY_BUDGET) {
+    pthread_mutex_unlock(&file_memory_mutex);
+    errno = EFBIG;
+    return -1;
+  }
+  while (amount > (size_t)STATIC_FILE_MEMORY_BUDGET - file_memory_in_use) {
+    if (pthread_cond_wait(&file_memory_available, &file_memory_mutex) != 0) {
+      pthread_mutex_unlock(&file_memory_mutex);
+      errno = EBUSY;
+      return -1;
+    }
+  }
+  file_memory_in_use += amount;
+  pthread_mutex_unlock(&file_memory_mutex);
+  return 0;
+}
+
+static void release_file_memory(size_t amount) {
+  if (amount == 0) {
+    return;
+  }
+  pthread_mutex_lock(&file_memory_mutex);
+  file_memory_in_use -= amount;
+  pthread_cond_broadcast(&file_memory_available);
+  pthread_mutex_unlock(&file_memory_mutex);
+}
 
 static int copy_string(char *destination, size_t capacity, const char *source) {
   size_t length = strlen(source);
@@ -114,15 +159,6 @@ static int decode_request_path(const char *target, char *relative_path,
   return 0;
 }
 
-static int path_is_inside_root(const char *root, const char *path) {
-  size_t root_length = strlen(root);
-  if (strncmp(root, path, root_length) != 0)
-    return 0;
-  if (root_length == 1 && root[0] == '/')
-    return path[0] == '/';
-  return path[root_length] == '/' || path[root_length] == '\0';
-}
-
 static const char *content_type_for_path(const StaticFileServer *server,
                                          const char *path) {
   const char *extension = strrchr(path, '.');
@@ -133,88 +169,151 @@ static const char *content_type_for_path(const StaticFileServer *server,
                            server->default_mime_type);
 }
 
-static int resolve_file_path(const StaticFileServer *server,
-                             const char *relative_path, char *resolved_path,
-                             size_t capacity) {
-  char candidate[PATH_MAX];
-  int written = snprintf(candidate, sizeof(candidate), "%s/%s",
-                         server->document_root, relative_path);
-  if (written < 0 || (size_t)written >= sizeof(candidate) ||
-      realpath(candidate, resolved_path) == NULL ||
-      !path_is_inside_root(server->document_root, resolved_path)) {
+static int open_file_beneath(const StaticFileServer *server,
+                             const char *relative_path,
+                             int allow_directory_index,
+                             char *opened_relative, size_t path_capacity) {
+  char path[PATH_MAX];
+  if (relative_path == NULL || *relative_path == '\0' ||
+      strlen(relative_path) >= sizeof(path) ||
+      copy_string(path, sizeof(path), relative_path) != 0) {
+    errno = ENAMETOOLONG;
     return -1;
   }
 
-  struct stat status;
-  if (stat(resolved_path, &status) != 0)
+  int directory_fd = dup(server->document_root_fd);
+  if (directory_fd < 0) {
     return -1;
-  if (S_ISDIR(status.st_mode)) {
-    written = snprintf(candidate, sizeof(candidate), "%s/%s", resolved_path,
-                       server->index_file);
-    if (written < 0 || (size_t)written >= sizeof(candidate) ||
-        realpath(candidate, resolved_path) == NULL ||
-        !path_is_inside_root(server->document_root, resolved_path)) {
+  }
+
+  char *save = NULL;
+  char *component = strtok_r(path, "/", &save);
+  while (component != NULL) {
+    char *next = strtok_r(NULL, "/", &save);
+    if (next != NULL) {
+      int child_fd = openat(directory_fd, component,
+                            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+      int saved_errno = errno;
+      close(directory_fd);
+      if (child_fd < 0) {
+        errno = saved_errno;
+        return -1;
+      }
+      directory_fd = child_fd;
+      component = next;
+      continue;
+    }
+
+    int file_fd = openat(directory_fd, component,
+                         O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    int saved_errno = errno;
+    close(directory_fd);
+    if (file_fd < 0) {
+      errno = saved_errno;
       return -1;
     }
-    if (stat(resolved_path, &status) != 0)
+
+    struct stat status;
+    if (fstat(file_fd, &status) != 0) {
+      saved_errno = errno;
+      close(file_fd);
+      errno = saved_errno;
       return -1;
+    }
+
+    if (S_ISDIR(status.st_mode) && allow_directory_index) {
+      close(file_fd);
+      char index_path[PATH_MAX];
+      int written = snprintf(index_path, sizeof(index_path), "%s/%s",
+                             relative_path, server->index_file);
+      if (written < 0 || (size_t)written >= sizeof(index_path) ||
+          copy_string(opened_relative, path_capacity, index_path) != 0) {
+        errno = ENAMETOOLONG;
+        return -1;
+      }
+      return open_file_beneath(server, index_path, 0, opened_relative,
+                               path_capacity);
+    }
+
+    if (!S_ISREG(status.st_mode)) {
+      close(file_fd);
+      errno = EACCES;
+      return -1;
+    }
+    if (copy_string(opened_relative, path_capacity, relative_path) != 0) {
+      close(file_fd);
+      errno = ENAMETOOLONG;
+      return -1;
+    }
+    return file_fd;
   }
-  if (!S_ISREG(status.st_mode) || strlen(resolved_path) >= capacity)
-    return -1;
-  return 0;
+
+  close(directory_fd);
+  errno = EINVAL;
+  return -1;
 }
 
 static int load_relative_file(const StaticFileServer *server,
                               const char *relative_path, StaticFile *file) {
   file->data = NULL;
   file->length = 0;
+  file->memory_charge = 0;
   file->content_type = NULL;
   file->relative_path[0] = '\0';
 
-  char resolved_path[PATH_MAX];
-  if (resolve_file_path(server, relative_path, resolved_path,
-                        sizeof(resolved_path)) != 0) {
-    return -1;
-  }
-
-  FILE *input = fopen(resolved_path, "rb");
-  if (input == NULL)
+  char opened_relative[PATH_MAX];
+  int input = open_file_beneath(server, relative_path, 1, opened_relative,
+                                sizeof(opened_relative));
+  if (input < 0)
     return -1;
 
   struct stat status;
-  if (fstat(fileno(input), &status) != 0 || !S_ISREG(status.st_mode) ||
+  if (fstat(input, &status) != 0 || !S_ISREG(status.st_mode) ||
       status.st_size < 0 ||
       (unsigned long long)status.st_size > server->max_file_size_bytes) {
-    fclose(input);
+    close(input);
     return -1;
   }
 
   size_t length = (size_t)status.st_size;
+  if (reserve_file_memory(length) != 0) {
+    close(input);
+    return -1;
+  }
   unsigned char *data = malloc(length == 0 ? 1 : length);
   if (data == NULL) {
-    fclose(input);
+    release_file_memory(length);
+    close(input);
     return -1;
   }
 
-  size_t bytes_read = fread(data, 1, length, input);
-  int read_failed = ferror(input) || bytes_read != length;
-  fclose(input);
-  if (read_failed) {
-    free(data);
-    return -1;
+  size_t bytes_read = 0;
+  while (bytes_read < length) {
+    ssize_t result = read(input, data + bytes_read, length - bytes_read);
+    if (result < 0 && errno == EINTR) {
+      continue;
+    }
+    if (result <= 0) {
+      free(data);
+      release_file_memory(length);
+      close(input);
+      return -1;
+    }
+    bytes_read += (size_t)result;
   }
+  close(input);
 
   file->data = data;
   file->length = length;
-  file->content_type = content_type_for_path(server, resolved_path);
-  const char *relative_file = resolved_path + strlen(server->document_root);
-  if (*relative_file == '/')
-    relative_file++;
+  file->memory_charge = length;
+  file->content_type = content_type_for_path(server, opened_relative);
   if (copy_string(file->relative_path, sizeof(file->relative_path),
-                  relative_file) != 0) {
+                  opened_relative) != 0) {
     free(data);
+    release_file_memory(length);
     file->data = NULL;
     file->length = 0;
+    file->memory_charge = 0;
     file->content_type = NULL;
     return -1;
   }
@@ -224,23 +323,33 @@ static int load_relative_file(const StaticFileServer *server,
 int static_file_server_init(StaticFileServer *server,
                             const struct ServerConfig *config) {
   if (server == NULL || config == NULL || config->max_static_file_size_mb < 1 ||
-      config->max_static_file_size_mb > 1024) {
+      config->max_static_file_size_mb > 256) {
     return -1;
   }
 
   memset(server, 0, sizeof(*server));
+  server->document_root_fd = -1;
   char resolved_root[PATH_MAX];
-  struct stat root_status;
   if (realpath(config->document_root, resolved_root) == NULL ||
       strlen(resolved_root) >= sizeof(server->document_root) ||
       copy_string(server->document_root, sizeof(server->document_root),
-                  resolved_root) != 0 ||
-      stat(server->document_root, &root_status) != 0 ||
-      !S_ISDIR(root_status.st_mode)) {
+                  resolved_root) != 0) {
     char message[384];
     snprintf(message, sizeof(message), "Invalid document root '%s'",
              config->document_root);
     log_error(message);
+    return -1;
+  }
+
+  server->document_root_fd =
+      open(server->document_root,
+           O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  struct stat root_status;
+  if (server->document_root_fd < 0 ||
+      fstat(server->document_root_fd, &root_status) != 0 ||
+      !S_ISDIR(root_status.st_mode)) {
+    log_error("Could not securely open the document root directory");
+    static_file_server_destroy(server);
     return -1;
   }
 
@@ -254,6 +363,7 @@ int static_file_server_init(StaticFileServer *server,
       copy_string(server->default_mime_type, sizeof(server->default_mime_type),
                   config->default_mime_type) != 0) {
     log_error("Invalid static file configuration");
+    static_file_server_destroy(server);
     return -1;
   }
 
@@ -261,21 +371,26 @@ int static_file_server_init(StaticFileServer *server,
       (size_t)config->max_static_file_size_mb * BYTES_PER_MEGABYTE;
   if (server->max_file_size_bytes > STATIC_FILE_MAX_SIZE) {
     log_error("Configured static file limit exceeds the server maximum");
+    static_file_server_destroy(server);
     return -1;
   }
 
-  if (mime_types_load(&server->mime_types, config->mime_types_file) != 0)
+  if (mime_types_load(&server->mime_types, config->mime_types_file) != 0) {
+    static_file_server_destroy(server);
     return -1;
+  }
 
   StaticFile check = {0};
   if (load_relative_file(server, server->index_file, &check) != 0) {
     log_error("Configured index file cannot be loaded from the document root");
+    static_file_server_destroy(server);
     return -1;
   }
   static_file_release(&check);
 
   if (load_relative_file(server, server->not_found_page, &check) != 0) {
     log_error("Configured 404 page cannot be loaded from the document root");
+    static_file_server_destroy(server);
     return -1;
   }
   static_file_release(&check);
@@ -283,8 +398,13 @@ int static_file_server_init(StaticFileServer *server,
 }
 
 void static_file_server_destroy(StaticFileServer *server) {
-  if (server != NULL)
+  if (server != NULL) {
+    if (server->document_root_fd >= 0) {
+      close(server->document_root_fd);
+    }
     memset(server, 0, sizeof(*server));
+    server->document_root_fd = -1;
+  }
 }
 
 int static_file_load(const StaticFileServer *server, const char *request_target,
@@ -293,6 +413,7 @@ int static_file_load(const StaticFileServer *server, const char *request_target,
     return -1;
   file->data = NULL;
   file->length = 0;
+  file->memory_charge = 0;
   file->content_type = NULL;
   file->relative_path[0] = '\0';
 
@@ -312,6 +433,7 @@ int static_file_load_not_found(const StaticFileServer *server,
     return -1;
   file->data = NULL;
   file->length = 0;
+  file->memory_charge = 0;
   file->content_type = NULL;
   file->relative_path[0] = '\0';
   return load_relative_file(server, server->not_found_page, file);
@@ -321,8 +443,10 @@ void static_file_release(StaticFile *file) {
   if (file == NULL)
     return;
   free(file->data);
+  release_file_memory(file->memory_charge);
   file->data = NULL;
   file->length = 0;
+  file->memory_charge = 0;
   file->content_type = NULL;
   file->relative_path[0] = '\0';
 }

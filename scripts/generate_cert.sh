@@ -2,70 +2,73 @@
 
 set -Eeuo pipefail
 
-DOMAIN="${1:-localhost}"
-DAYS="${2:-365}"
-KEY_FILE="certs/server.key"
-CSR_FILE="certs/server.csr"
-CRT_FILE="certs/server.crt"
-
 usage() {
-    echo "Usage: $0 [domain] [days]"
-    exit 1
+  cat <<'EOF'
+Usage: generate_cert.sh [--force] [hostname-or-ip] [valid-days]
+
+Creates a self-signed development certificate in certs/dev-server.crt and
+certs/dev-server.key. The certificate includes a Subject Alternative Name.
+Existing files are preserved unless --force is supplied.
+EOF
 }
 
-if [[ "$#" -gt 2 || -z "$DOMAIN" || ! "$DAYS" =~ ^[1-9][0-9]*$ ]]; then
-    usage
+force=0
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage
+  exit 0
+fi
+if [[ "${1:-}" == "--force" ]]; then
+  force=1
+  shift
+fi
+if [[ "$#" -gt 2 ]]; then
+  usage >&2
+  exit 2
 fi
 
-install_openssl() {
-    echo "OpenSSL not found. Installing..."
-
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        command -v brew >/dev/null 2>&1 || {
-            echo "Error: Install Homebrew from https://brew.sh/"
-            exit 1
-        }
-        brew install openssl
-    elif command -v dnf >/dev/null 2>&1; then
-        sudo dnf install -y openssl
-    elif command -v yum >/dev/null 2>&1; then
-        sudo yum install -y openssl
-    elif command -v apt-get >/dev/null 2>&1; then
-        sudo apt-get update
-        sudo apt-get install -y openssl
-    elif command -v pacman >/dev/null 2>&1; then
-        sudo pacman -Sy --needed --noconfirm openssl
-    elif command -v apk >/dev/null 2>&1; then
-        sudo apk add openssl
-    else
-        echo "Error: Unsupported package manager."
-        exit 1
-    fi
-
-    command -v openssl >/dev/null 2>&1 || {
-        echo "Error: OpenSSL installation failed or is not in PATH."
-        exit 1
-    }
-}
+hostname="${1:-localhost}"
+days="${2:-365}"
+if [[ ! "$days" =~ ^[1-9][0-9]*$ ]] || (( ${#days} > 3 )) ||
+   (( 10#$days > 825 )); then
+  printf 'Certificate validity must be between 1 and 825 days.\n' >&2
+  exit 2
+fi
 
 if ! command -v openssl >/dev/null 2>&1; then
-    install_openssl
+  printf 'OpenSSL is required. Install it with your system package manager and retry.\n' >&2
+  exit 1
 fi
 
-echo "OpenSSL: $(openssl version)"
-echo "Generating certificate for $DOMAIN ($DAYS days)..."
+if [[ "$hostname" == *:* || "$hostname" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  san="IP:$hostname"
+elif [[ "$hostname" =~ ^[A-Za-z0-9*.-]+$ ]]; then
+  san="DNS:$hostname"
+else
+  printf 'Use a DNS hostname or IP address for the certificate SAN.\n' >&2
+  exit 2
+fi
 
-mkdir -p certs
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+project_dir="$(cd -- "$script_dir/.." && pwd)"
+cert_dir="$project_dir/certs"
+key_file="$cert_dir/server.key"
+cert_file="$cert_dir/server.crt"
+mkdir -p "$cert_dir"
 
-openssl genrsa -out "$KEY_FILE" 2048
+if (( ! force )) && { [[ -e "$key_file" ]] || [[ -e "$cert_file" ]]; }; then
+  printf 'Certificate or key already exists. Use --force to replace it.\n' >&2
+  exit 1
+fi
 
-openssl req -new -key "$KEY_FILE" -out "$CSR_FILE" \
-    -subj "/C=US/ST=State/L=City/O=Organization/CN=$DOMAIN"
+umask 077
+openssl req -x509 -newkey rsa:2048 -sha256 -nodes \
+  -days "$days" \
+  -subj '/CN=Development Certificate' \
+  -addext "subjectAltName=$san" \
+  -keyout "$key_file" -out "$cert_file"
+chmod 600 "$key_file"
+chmod 644 "$cert_file"
 
-openssl x509 -req -days "$DAYS" -in "$CSR_FILE" \
-    -signkey "$KEY_FILE" -out "$CRT_FILE" -sha256
-
-echo "Certificate generation completed."
-echo "Private key: $KEY_FILE"
-echo "CSR:         $CSR_FILE"
-echo "Certificate: $CRT_FILE"
+printf 'Created development certificate for %s (%s days).\n' "$hostname" "$days"
+printf 'Certificate: %s\nPrivate key: %s\n' "$cert_file" "$key_file"
+printf 'This server does not load these files directly; configure a TLS proxy to use them.\n'

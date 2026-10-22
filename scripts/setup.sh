@@ -24,6 +24,7 @@ Run options:
   --with-cups     Start/enable the system CUPS service before building
   --force-cert    Replace an existing development certificate and key
   --check         Configure and build only; do not create secrets or start
+  --start         Only Starts the server with existing build and config
   -h, --help      Show this help
 
 Certificate:
@@ -463,6 +464,9 @@ port = $port
 tls_enabled = true
 tls_certificate_file = $certificate
 tls_private_key_file = $private_key
+
+# turn on throttling to avoid DoS attacks in development
+throttling = false
 admin_api_token = $admin_token
 CONFIG
   } > "$runtime_config"

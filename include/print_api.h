@@ -12,5 +12,8 @@
 size_t print_api_handle(HttpTransport *transport, const HttpRequest *request,
                         const ServerConfig *config, DataStore *data_store,
                         size_t *bytes_received);
+void print_api_sync_jobs(DataStore *data_store, const char *phone_e164);
+DataResult print_api_cancel_job(DataStore *data_store, const char *phone_e164,
+                                int64_t job_id);
 
 #endif

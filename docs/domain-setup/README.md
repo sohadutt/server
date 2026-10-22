@@ -147,6 +147,11 @@ router forwarding, cloud firewall rules, and whether another service already
 owns those ports. Caddy's [troubleshooting guide](https://caddyserver.com/docs/troubleshooting)
 lists common causes.
 
+Mounted Vite and static applications use paths on the same domain, for example
+`https://print.example.com/dashboard/`. The Caddy site block above already
+proxies all paths to the C server; add the application mount with
+[`setup.sh static`](../static-deployment.md), then restart the C server.
+
 ## Important deployment notes
 
 - Keep port 8443 loopback-only. Caddy should be the only public web listener.

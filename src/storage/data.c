@@ -55,7 +55,53 @@ static const char schema_sql[] =
     " ON credit_ledger(user_id, reference) WHERE reference IS NOT NULL;"
     "CREATE INDEX credit_ledger_user_time"
     " ON credit_ledger(user_id, created_at DESC);"
-    "PRAGMA user_version = 2;";
+    "CREATE TABLE print_jobs ("
+    " id INTEGER PRIMARY KEY,"
+    " user_id INTEGER NOT NULL REFERENCES users(id),"
+    " cups_job_id INTEGER NOT NULL CHECK(cups_job_id > 0),"
+    " printer TEXT NOT NULL CHECK(length(printer) BETWEEN 1 AND 255),"
+    " format TEXT NOT NULL CHECK(length(format) BETWEEN 1 AND 63),"
+    " copies INTEGER NOT NULL CHECK(copies BETWEEN 1 AND 99),"
+    " sides TEXT NOT NULL CHECK(length(sides) BETWEEN 1 AND 31),"
+    " pages TEXT NOT NULL CHECK(length(pages) <= 255),"
+    " status TEXT NOT NULL DEFAULT 'submitted'"
+    " CHECK(status IN ('submitted', 'processing', 'completed', 'canceled', 'failed')) ,"
+    " created_at INTEGER NOT NULL,"
+    " batch_id TEXT NOT NULL CHECK(length(batch_id) BETWEEN 1 AND 64),"
+    " document_name TEXT NOT NULL CHECK(length(document_name) BETWEEN 1 AND 255),"
+    " request_id TEXT NOT NULL CHECK(length(request_id) BETWEEN 1 AND 64)"
+    ");"
+    "CREATE INDEX print_jobs_user_time ON print_jobs(user_id, created_at DESC);"
+    "CREATE UNIQUE INDEX print_jobs_user_request ON print_jobs(user_id, request_id);"
+    "PRAGMA user_version = 5;";
+
+static const char print_jobs_schema[] =
+    "CREATE TABLE print_jobs ("
+    " id INTEGER PRIMARY KEY,"
+    " user_id INTEGER NOT NULL REFERENCES users(id),"
+    " cups_job_id INTEGER NOT NULL CHECK(cups_job_id > 0),"
+    " printer TEXT NOT NULL CHECK(length(printer) BETWEEN 1 AND 255),"
+    " format TEXT NOT NULL CHECK(length(format) BETWEEN 1 AND 63),"
+    " copies INTEGER NOT NULL CHECK(copies BETWEEN 1 AND 99),"
+    " sides TEXT NOT NULL CHECK(length(sides) BETWEEN 1 AND 31),"
+    " pages TEXT NOT NULL CHECK(length(pages) <= 255),"
+    " status TEXT NOT NULL DEFAULT 'submitted'"
+    " CHECK(status IN ('submitted', 'processing', 'completed', 'canceled', 'failed')) ,"
+    " created_at INTEGER NOT NULL"
+    ");"
+    "CREATE INDEX print_jobs_user_time ON print_jobs(user_id, created_at DESC);";
+
+static const char job_batch_migration[] =
+    "ALTER TABLE print_jobs ADD COLUMN batch_id TEXT NOT NULL DEFAULT '';"
+    "ALTER TABLE print_jobs ADD COLUMN document_name TEXT NOT NULL "
+    "DEFAULT 'uploaded-document';"
+    "PRAGMA user_version = 4;";
+
+static const char job_request_migration[] =
+    "ALTER TABLE print_jobs ADD COLUMN request_id TEXT NOT NULL DEFAULT '';"
+    "CREATE UNIQUE INDEX print_jobs_user_request ON print_jobs(user_id, request_id) "
+    "WHERE request_id <> '';"
+    "PRAGMA user_version = 5;";
 
 static int valid_phone(const char *phone) {
   if (phone == NULL || phone[0] != '+')
@@ -218,19 +264,40 @@ static int schema_version(sqlite3 *database) {
 
 static int schema_initialize(sqlite3 *database) {
   int version = schema_version(database);
-  if (version == 2)
+  if (version == 5)
     return 0;
-  if ((version != 0 && version != 1) ||
+  if ((version < 0 || version > 4) ||
       execute_sql(database, "BEGIN EXCLUSIVE;") != 0)
     return -1;
   version = schema_version(database);
-  if (version == 2)
+  if (version == 5)
     return execute_sql(database, "COMMIT;");
   if (version == 1) {
     if (execute_sql(database,
                     "ALTER TABLE users ADD COLUMN password_salt BLOB;"
-                    "ALTER TABLE users ADD COLUMN password_hash BLOB;"
-                    "PRAGMA user_version = 2;") != 0) {
+                    "ALTER TABLE users ADD COLUMN password_hash BLOB;") != 0) {
+      (void)sqlite3_exec(database, "ROLLBACK;", NULL, NULL, NULL);
+      return -1;
+    }
+    version = 2;
+  }
+  if (version == 2) {
+    if (execute_sql(database, print_jobs_schema) != 0 ||
+        execute_sql(database, "PRAGMA user_version = 3;") != 0) {
+      (void)sqlite3_exec(database, "ROLLBACK;", NULL, NULL, NULL);
+      return -1;
+    }
+    version = 3;
+  }
+  if (version == 3) {
+    if (execute_sql(database, job_batch_migration) != 0) {
+      (void)sqlite3_exec(database, "ROLLBACK;", NULL, NULL, NULL);
+      return -1;
+    }
+    version = 4;
+  }
+  if (version == 4) {
+    if (execute_sql(database, job_request_migration) != 0) {
       (void)sqlite3_exec(database, "ROLLBACK;", NULL, NULL, NULL);
       return -1;
     }
@@ -1023,3 +1090,268 @@ DataResult data_credit_charge(DataStore *store, const char *phone_e164,
   return change_credits(store, phone_e164, credits, reference, note, 0,
                         balance_after);
 }
+
+DataResult data_print_job_record(DataStore *store, const char *phone_e164,
+                                 int cups_job_id, const char *printer,
+                                 const char *format, int copies,
+                                 const char *sides, const char *pages,
+                                 const char *batch_id,
+                                 const char *document_name,
+                                 const char *request_id,
+                                 int64_t *job_id) {
+  if (store == NULL || !valid_phone(phone_e164) || cups_job_id <= 0 ||
+      printer == NULL || printer[0] == '\0' || strlen(printer) >= 256 ||
+      format == NULL || format[0] == '\0' || strlen(format) >= 64 ||
+      copies < 1 || copies > 99 || sides == NULL || sides[0] == '\0' ||
+      strlen(sides) >= 32 || !valid_optional_text(pages, 255) ||
+      batch_id == NULL || batch_id[0] == '\0' ||
+      strlen(batch_id) >= DATA_PRINT_BATCH_CAPACITY || document_name == NULL ||
+      document_name[0] == '\0' ||
+      strlen(document_name) >= DATA_PRINT_NAME_CAPACITY || request_id == NULL ||
+      request_id[0] == '\0' ||
+      strlen(request_id) >= DATA_PRINT_REQUEST_CAPACITY)
+    return DATA_INVALID;
+
+  static const char sql[] =
+      "INSERT INTO print_jobs(user_id, cups_job_id, printer, format, copies, "
+      "sides, pages, status, created_at, batch_id, document_name, request_id) "
+      "SELECT id, ?2, ?3, ?4, ?5, ?6, ?7, 'submitted', "
+      "CAST(strftime('%s', 'now') AS INTEGER), ?8, ?9, ?10 "
+      "FROM users "
+      "WHERE phone_e164 = ?1 AND active = 1;";
+  pthread_mutex_lock(&store->mutex);
+  sqlite3_stmt *statement = NULL;
+  int result = sqlite3_prepare_v2(store->database, sql, -1, &statement, NULL);
+  if (result == SQLITE_OK)
+    result = sqlite3_bind_text(statement, 1, phone_e164, -1, SQLITE_TRANSIENT);
+  if (result == SQLITE_OK)
+    result = sqlite3_bind_int(statement, 2, cups_job_id);
+  if (result == SQLITE_OK)
+    result = sqlite3_bind_text(statement, 3, printer, -1, SQLITE_TRANSIENT);
+  if (result == SQLITE_OK)
+    result = sqlite3_bind_text(statement, 4, format, -1, SQLITE_TRANSIENT);
+  if (result == SQLITE_OK)
+    result = sqlite3_bind_int(statement, 5, copies);
+  if (result == SQLITE_OK)
+    result = sqlite3_bind_text(statement, 6, sides, -1, SQLITE_TRANSIENT);
+  if (result == SQLITE_OK)
+    result = sqlite3_bind_text(statement, 7, pages != NULL ? pages : "", -1,
+                               SQLITE_TRANSIENT);
+  if (result == SQLITE_OK)
+    result = sqlite3_bind_text(statement, 8, batch_id, -1, SQLITE_TRANSIENT);
+  if (result == SQLITE_OK)
+    result = sqlite3_bind_text(statement, 9, document_name, -1, SQLITE_TRANSIENT);
+  if (result == SQLITE_OK)
+    result = sqlite3_bind_text(statement, 10, request_id, -1, SQLITE_TRANSIENT);
+  if (result == SQLITE_OK)
+    result = sqlite3_step(statement);
+  int changed = sqlite3_changes(store->database);
+  sqlite3_finalize(statement);
+  DataResult status = DATA_ERROR;
+  if (result == SQLITE_DONE && changed == 1) {
+    if (job_id != NULL)
+      *job_id = sqlite3_last_insert_rowid(store->database);
+    status = DATA_OK;
+  } else if (result == SQLITE_DONE) {
+    status = DATA_NOT_FOUND;
+  } else {
+    status = map_sqlite_result(result);
+  }
+  pthread_mutex_unlock(&store->mutex);
+  return status;
+}
+
+static int copy_column(sqlite3_stmt *statement, int column, char *output,
+                       size_t capacity) {
+  const unsigned char *value = sqlite3_column_text(statement, column);
+  int length = sqlite3_column_bytes(statement, column);
+  if (value == NULL || length < 0 || (size_t)length >= capacity)
+    return -1;
+  memcpy(output, value, (size_t)length);
+  output[length] = '\0';
+  return 0;
+}
+
+DataResult data_print_job_list(DataStore *store, const char *phone_e164,
+                               DataPrintJob **jobs, size_t *count) {
+  if (store == NULL || !valid_phone(phone_e164) || jobs == NULL ||
+      count == NULL)
+    return DATA_INVALID;
+  *jobs = NULL;
+  *count = 0;
+  static const char sql[] =
+      "SELECT j.id, j.cups_job_id, j.printer, j.format, j.copies, j.sides, "
+      "j.pages, j.status, j.created_at, j.batch_id, j.document_name, j.request_id "
+      "FROM print_jobs AS j "
+      "JOIN users AS u ON u.id = j.user_id "
+      "WHERE u.phone_e164 = ?1 ORDER BY j.id DESC LIMIT 50;";
+  pthread_mutex_lock(&store->mutex);
+  sqlite3_stmt *statement = NULL;
+  int result = sqlite3_prepare_v2(store->database, sql, -1, &statement, NULL);
+  if (result == SQLITE_OK)
+    result = sqlite3_bind_text(statement, 1, phone_e164, -1, SQLITE_TRANSIENT);
+  DataPrintJob *items = NULL;
+  size_t used = 0;
+  if (result == SQLITE_OK) {
+    items = calloc(50, sizeof(*items));
+    if (items == NULL)
+      result = SQLITE_NOMEM;
+  }
+  while (result == SQLITE_OK || result == SQLITE_ROW) {
+    result = sqlite3_step(statement);
+    if (result == SQLITE_DONE)
+      break;
+    if (result != SQLITE_ROW)
+      break;
+    DataPrintJob *job = &items[used];
+    job->id = sqlite3_column_int64(statement, 0);
+    job->cups_job_id = sqlite3_column_int(statement, 1);
+    job->copies = sqlite3_column_int(statement, 4);
+    job->created_at = sqlite3_column_int64(statement, 8);
+    if (copy_column(statement, 2, job->printer, sizeof(job->printer)) != 0 ||
+        copy_column(statement, 3, job->format, sizeof(job->format)) != 0 ||
+        copy_column(statement, 5, job->sides, sizeof(job->sides)) != 0 ||
+        copy_column(statement, 6, job->pages, sizeof(job->pages)) != 0 ||
+        copy_column(statement, 7, job->status, sizeof(job->status)) != 0 ||
+        copy_column(statement, 9, job->batch_id, sizeof(job->batch_id)) != 0 ||
+        copy_column(statement, 10, job->document_name,
+                    sizeof(job->document_name)) != 0 ||
+        copy_column(statement, 11, job->request_id,
+                    sizeof(job->request_id)) != 0) {
+      result = SQLITE_CORRUPT;
+      break;
+    }
+    used++;
+  }
+  sqlite3_finalize(statement);
+  pthread_mutex_unlock(&store->mutex);
+  if (result != SQLITE_DONE) {
+    free(items);
+    return DATA_ERROR;
+  }
+  if (used == 0) {
+    free(items);
+    return DATA_OK;
+  }
+  *jobs = items;
+  *count = used;
+  return DATA_OK;
+}
+
+DataResult data_print_job_get(DataStore *store, const char *phone_e164,
+                              int64_t job_id, DataPrintJob *job) {
+  if (store == NULL || !valid_phone(phone_e164) || job_id <= 0 || job == NULL)
+    return DATA_INVALID;
+  static const char sql[] =
+      "SELECT j.id, j.cups_job_id, j.printer, j.format, j.copies, j.sides, "
+      "j.pages, j.status, j.created_at, j.batch_id, j.document_name, "
+      "j.request_id "
+      "FROM print_jobs AS j JOIN users AS u ON u.id = j.user_id "
+      "WHERE u.phone_e164 = ?1 AND j.id = ?2;";
+  memset(job, 0, sizeof(*job));
+  pthread_mutex_lock(&store->mutex);
+  sqlite3_stmt *statement = NULL;
+  int result = sqlite3_prepare_v2(store->database, sql, -1, &statement, NULL);
+  if (result == SQLITE_OK)
+    result = sqlite3_bind_text(statement, 1, phone_e164, -1, SQLITE_TRANSIENT);
+  if (result == SQLITE_OK)
+    result = sqlite3_bind_int64(statement, 2, job_id);
+  if (result == SQLITE_OK)
+    result = sqlite3_step(statement);
+  DataResult status = DATA_NOT_FOUND;
+  if (result == SQLITE_ROW) {
+    job->id = sqlite3_column_int64(statement, 0);
+    job->cups_job_id = sqlite3_column_int(statement, 1);
+    job->copies = sqlite3_column_int(statement, 4);
+    job->created_at = sqlite3_column_int64(statement, 8);
+    status = copy_column(statement, 2, job->printer, sizeof(job->printer)) == 0 &&
+                     copy_column(statement, 3, job->format,
+                                 sizeof(job->format)) == 0 &&
+                     copy_column(statement, 5, job->sides,
+                                 sizeof(job->sides)) == 0 &&
+                     copy_column(statement, 6, job->pages,
+                                 sizeof(job->pages)) == 0 &&
+                     copy_column(statement, 7, job->status,
+                                 sizeof(job->status)) == 0 &&
+                     copy_column(statement, 9, job->batch_id,
+                                 sizeof(job->batch_id)) == 0 &&
+                     copy_column(statement, 10, job->document_name,
+                                 sizeof(job->document_name)) == 0 &&
+                     copy_column(statement, 11, job->request_id,
+                                 sizeof(job->request_id)) == 0
+                 ? DATA_OK
+                 : DATA_ERROR;
+  } else if (result != SQLITE_DONE) {
+    status = DATA_ERROR;
+  }
+  sqlite3_finalize(statement);
+  pthread_mutex_unlock(&store->mutex);
+  if (status != DATA_OK)
+    memset(job, 0, sizeof(*job));
+  return status;
+}
+
+DataResult data_print_job_find_request(DataStore *store,
+                                       const char *phone_e164,
+                                       const char *request_id,
+                                       DataPrintJob *job) {
+  if (store == NULL || !valid_phone(phone_e164) || request_id == NULL ||
+      request_id[0] == '\0' ||
+      strlen(request_id) >= DATA_PRINT_REQUEST_CAPACITY || job == NULL)
+    return DATA_INVALID;
+  static const char sql[] =
+      "SELECT j.id FROM print_jobs AS j JOIN users AS u ON u.id = j.user_id "
+      "WHERE u.phone_e164 = ?1 AND j.request_id = ?2;";
+  pthread_mutex_lock(&store->mutex);
+  sqlite3_stmt *statement = NULL;
+  int result = sqlite3_prepare_v2(store->database, sql, -1, &statement, NULL);
+  if (result == SQLITE_OK)
+    result = sqlite3_bind_text(statement, 1, phone_e164, -1, SQLITE_TRANSIENT);
+  if (result == SQLITE_OK)
+    result = sqlite3_bind_text(statement, 2, request_id, -1, SQLITE_TRANSIENT);
+  if (result == SQLITE_OK)
+    result = sqlite3_step(statement);
+  int64_t job_id = result == SQLITE_ROW ? sqlite3_column_int64(statement, 0) : 0;
+  DataResult status = result == SQLITE_ROW ? DATA_OK
+                      : result == SQLITE_DONE ? DATA_NOT_FOUND
+                                              : DATA_ERROR;
+  sqlite3_finalize(statement);
+  pthread_mutex_unlock(&store->mutex);
+  return status == DATA_OK
+             ? data_print_job_get(store, phone_e164, job_id, job)
+             : status;
+}
+
+DataResult data_print_job_set_status(DataStore *store, const char *phone_e164,
+                                     int64_t job_id, const char *status) {
+  if (store == NULL || !valid_phone(phone_e164) || job_id <= 0 ||
+      status == NULL ||
+      (strcmp(status, "submitted") != 0 && strcmp(status, "processing") != 0 &&
+       strcmp(status, "completed") != 0 && strcmp(status, "canceled") != 0 &&
+       strcmp(status, "failed") != 0))
+    return DATA_INVALID;
+  static const char sql[] =
+      "UPDATE print_jobs SET status = ?1 WHERE id = ?2 AND user_id = "
+      "(SELECT id FROM users WHERE phone_e164 = ?3) AND "
+      "(status NOT IN ('completed', 'canceled', 'failed') OR "
+      "?1 IN ('completed', 'canceled', 'failed'));";
+  pthread_mutex_lock(&store->mutex);
+  sqlite3_stmt *statement = NULL;
+  int result = sqlite3_prepare_v2(store->database, sql, -1, &statement, NULL);
+  if (result == SQLITE_OK)
+    result = sqlite3_bind_text(statement, 1, status, -1, SQLITE_TRANSIENT);
+  if (result == SQLITE_OK)
+    result = sqlite3_bind_int64(statement, 2, job_id);
+  if (result == SQLITE_OK)
+    result = sqlite3_bind_text(statement, 3, phone_e164, -1, SQLITE_TRANSIENT);
+  if (result == SQLITE_OK)
+    result = sqlite3_step(statement);
+  int changed = sqlite3_changes(store->database);
+  sqlite3_finalize(statement);
+  pthread_mutex_unlock(&store->mutex);
+  if (result != SQLITE_DONE)
+    return DATA_ERROR;
+  return changed == 1 ? DATA_OK : DATA_NOT_FOUND;
+}
+
+void data_print_job_list_free(DataPrintJob *jobs) { free(jobs); }

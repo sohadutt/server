@@ -6,7 +6,7 @@
 storage. The database stores E.164 phone IDs, active status,
 PBKDF2-HMAC-SHA256 password hashes, token digests, credit balances, and an
 append-only credit ledger. Existing schema version 1 databases migrate
-automatically.
+automatically, and are upgraded to schema version 5 when opened.
 
 The token API returns a newly generated bearer token only when issuing it; the
 database stores only its SHA-256 digest. Tokens cannot be recovered from the
@@ -21,6 +21,39 @@ print charge can be detected instead of applying the same ledger event twice.
 The module does not process payments, choose a price per page, or deduct
 credits for print jobs. Define pricing and payment verification before
 enabling credit charging in a job workflow.
+
+Accepted print submissions are recorded with an application job ID, a batch
+ID, an idempotency key, the document name, CUPS job ID, assigned queue,
+submitted format, copies, duplex mode, requested page ranges, and submission
+time. The browser can submit up to 10 files in one grouped batch; each file
+becomes its own CUPS job so it can have different copies, duplex mode, and PDF
+page ranges. Retries with the same request ID return the existing job when its
+database record is present. If a grouped submission partially succeeds,
+successful files remain in history and only failed files need to be retried.
+`GET /api/jobs` returns up to the most recent 50 records and refreshes their
+status from CUPS. `POST /api/jobs/{id}/cancel` cancels a pending or processing
+job belonging to the signed-in account. Status refresh happens when the user
+opens or refreshes job history. A CUPS job title includes the internal user ID
+and request ID so a retry can restore a missing SQLite row if the process
+stopped after CUPS accepted the job. This recovery depends on CUPS retaining
+job history; it is best effort, not an atomic transaction across CUPS and
+SQLite, and cannot guarantee exactly-once printing after CUPS history is
+purged. Credit charging remains disabled until pricing and a failure/refund
+policy are defined.
+
+By default, the first submitted document receives a QR code on its first page.
+It contains the account's numeric database ID and a small visible ID label; it
+does not include the phone number because printouts can be shared or discarded.
+The QR is an operational lookup hint only: it is not signed, cannot prove the
+owner's identity, and must never be accepted as an authentication credential.
+The default QR is 12 mm; the advanced menu can disable it or change its
+corner and size (16 or 20 mm). When a
+PDF page range is selected, the QR is placed on the first selected page.
+The browser creates the QR and prepares a stamped PDF before upload. It uses
+self-hosted versions of pdf-lib and qrcode-generator, so it does not call a
+third-party service or require PDF tools on the server. Images are converted to
+PDF in the browser. The QR is inset 10 mm from the page edge, which may still
+be inside some printers' unprintable margins.
 
 The server opens `database_path` at startup and creates its immediate parent
 directory with owner-only permissions if it is missing. SQLite uses WAL,
@@ -57,6 +90,15 @@ and print API routes require HTTPS; HTTP requests receive `426 Upgrade
 Required`. Responses use a restrictive Content Security Policy, disable MIME
 sniffing and framing, and disable caching. The browser keeps the user session
 token in memory only, so reloading the page requires signing in again.
+Login, signup, and admin routes are throttled per client address (12, 5, and
+30 requests per 60-second window, respectively). Forwarded client addresses
+are considered only when the TCP peer is loopback, for a local reverse proxy.
+Other API traffic is capped at 300 requests per address per minute. Each
+verified active bearer session is separately capped at 120 API requests and 3
+print submissions per minute. Session limits key a SHA-256 digest of the
+token, never the token itself. Repeated malformed HTTP requests are limited to
+10 replies per address per minute; further malformed connections are silently
+closed.
 
 Create an account:
 
@@ -82,8 +124,12 @@ Passwords must contain 8–128 characters. Reset invalidates the user's
 existing sessions. Outside local development, send admin secrets and user
 passwords only over HTTPS.
 
-The print page at `/print/` supports signup and sign-in using a phone number
-and password. Signup creates the account and session atomically. Login returns
+The print page at `/print/` supports sign-in using a phone number and password.
+Signup is disabled by default (`signup_enabled = false`) until a phone
+ownership verification provider is configured. Enabling signup in a trusted
+development environment does not prove the requester owns the phone number.
+Administrators can create accounts through the protected admin route or local
+CLI. Login returns
 a random session token; the browser keeps it in memory and uses it for print
 requests. `GET /api/me` returns the signed-in phone and balance;
 `POST /api/logout` revokes the current session. The print endpoint requires
@@ -95,11 +141,14 @@ verification before open signup requires confirmed phone ownership.
 | `/api/signup` | `POST` | Creates an account from `phone` and `password`, then returns a session |
 | `/api/login` | `POST` | Accepts phone and password and returns a session token and balance |
 | `/api/me` | `GET` | Returns the signed-in phone and current balance |
+| `/api/jobs` | `GET` | Returns the signed-in user's recent print jobs and refreshes CUPS status |
+| `/api/jobs/{id}/cancel` | `POST` | Cancels one of the signed-in user's active jobs |
 | `/api/logout` | `POST` | Revokes the current user session |
 | `/api/admin/users` | `POST` | Admin-only account creation with phone and password |
 | `/api/admin/users/password` | `POST` | Admin-only password reset; revokes all sessions |
 | `/api/admin/users/lookup` | `POST` | Admin-only lookup by phone ID |
 | `/api/admin/users/token` | `POST` | Issues a one-time, 30-day user token |
+| `/api/admin/users/token/revoke` | `POST` | Revokes a specific user's session token |
 | `/api/admin/users/revoke` | `POST` | Revokes every session for the phone ID |
 | `/api/admin/users/credits` | `POST` | Adds credits with a ledger entry and optional unique reference |
 | `/api/admin/users/active` | `POST` | Activates/deactivates an account; deactivation revokes sessions |
@@ -137,7 +186,9 @@ curl --fail-with-body \
   https://localhost:8443/api/print
 ```
 
-The browser page exposes these settings in a compact, mobile-friendly form.
-Printer selection stays server-side so a client cannot force a job onto a
-specific queue. The endpoint accepts one document per request; a multi-user
-JSON job manifest is not part of this upload contract.
+The browser page accepts up to 10 documents and exposes settings per document
+in a mobile-friendly form. The files are sent sequentially under a shared batch
+ID, and successful files remain visible if a later file fails. Retry only the
+failed documents; the request ID avoids resubmitting jobs that were already
+recorded. Printer selection stays server-side so a client cannot force a job
+onto a specific queue.

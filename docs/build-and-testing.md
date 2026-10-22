@@ -44,6 +44,17 @@ path safety, and SQLite accounts, tokens, and credits. The black-box
 integration test starts the built server on a temporary localhost port and
 uses an isolated SQLite database under `build/`.
 
+CI builds with strict compiler warnings, runs the suite in release mode, and
+runs it again with AddressSanitizer and UndefinedBehaviorSanitizer. A separate
+Clang/libFuzzer job exercises the HTTP request-line parser. To run that target
+locally with Clang:
+
+```sh
+CC=clang cmake -S . -B build-fuzz -DENABLE_FUZZING=ON -DBUILD_TESTING=OFF
+cmake --build build-fuzz --target fuzz_http_parser --parallel
+./build-fuzz/fuzz_http_parser -max_total_time=60
+```
+
 Run only one category or test by name:
 
 ```sh

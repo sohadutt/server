@@ -4,6 +4,8 @@ project(http_server VERSION 0.8.0 LANGUAGES C)
 
 include(CTest)
 
+option(ENABLE_FUZZING "Build libFuzzer parser targets (Clang only)" OFF)
+
 find_package(Cups REQUIRED)
 find_package(Threads REQUIRED)
 find_package(SQLite3 REQUIRED)
@@ -26,6 +28,7 @@ set(SERVER_SOURCES
     src/server/api.c
     src/server/print_api.c
     src/server/server.c
+    src/security/rate_limit.c
     src/tls/tls.c
     src/static/static.c
     src/static/mime_types.c
@@ -70,6 +73,19 @@ target_link_libraries(http_server PRIVATE
 
 message(STATUS "Building ${PROJECT_NAME} with C${CMAKE_C_STANDARD_LATEST}")
 
+if(ENABLE_FUZZING)
+    if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR "ENABLE_FUZZING requires Clang/libFuzzer")
+    endif()
+    add_executable(fuzz_http_parser
+        tests/fuzz/fuzz_http_parser.c src/http/parser.c)
+    configure_c_target(fuzz_http_parser)
+    target_compile_options(fuzz_http_parser PRIVATE
+        -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer)
+    target_link_options(fuzz_http_parser PRIVATE
+        -fsanitize=fuzzer,address,undefined)
+endif()
+
 if(BUILD_TESTING)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
@@ -104,6 +120,9 @@ if(BUILD_TESTING)
     add_unit_test(test_thread_pool unit_thread_pool
         tests/unit/test_thread_pool.c src/workers/thread_pool.c)
     target_link_libraries(test_thread_pool PRIVATE Threads::Threads)
+    add_unit_test(test_rate_limit unit_rate_limit
+        tests/unit/test_rate_limit.c src/security/rate_limit.c)
+    target_link_libraries(test_rate_limit PRIVATE Threads::Threads)
     add_unit_test(test_static unit_static_files
         tests/unit/test_static.c src/static/static.c src/static/mime_types.c
         src/server/config.c src/utils/logger.c)

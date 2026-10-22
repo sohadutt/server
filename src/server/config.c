@@ -28,6 +28,30 @@ static int copy_value(char *destination, size_t capacity, const char *value) {
   return 0;
 }
 
+static int safe_path_components(const char *path, int absolute) {
+  if (path == NULL || path[0] == '\0' || (absolute && path[0] != '/') ||
+      (!absolute && path[0] == '/') || strchr(path, '\\') != NULL)
+    return 0;
+  const char *segment = path + (absolute ? 1 : 0);
+  for (const char *cursor = segment;; cursor++) {
+    unsigned char character = (unsigned char)*cursor;
+    if (character != '\0' && character != '/' &&
+        (character < 0x20 || character == 0x7f || character == '?' ||
+         character == '#'))
+      return 0;
+    if (character == '/' || character == '\0') {
+      size_t length = (size_t)(cursor - segment);
+      if (length == 0 || (length == 1 && segment[0] == '.') ||
+          (length == 2 && segment[0] == '.' && segment[1] == '.'))
+        return 0;
+      if (character == '\0')
+        break;
+      segment = cursor + 1;
+    }
+  }
+  return 1;
+}
+
 static int parse_int(const char *value, int minimum, int maximum, int *result) {
   char *end;
   errno = 0;
@@ -53,6 +77,38 @@ static int parse_bool(const char *value, int *result) {
 }
 
 static int set_value(ServerConfig *config, const char *key, const char *value) {
+  if (strcmp(key, "static_mount") == 0) {
+    if (config->static_mount_count >= SERVER_STATIC_MOUNTS_MAX)
+      return -1;
+    char mount_value[512];
+    if (copy_value(mount_value, sizeof(mount_value), value) != 0)
+      return -1;
+    char *separator = strchr(mount_value, '|');
+    if (separator == NULL)
+      return -1;
+    *separator++ = '\0';
+    char *fallback = strchr(separator, '|');
+    if (fallback == NULL)
+      return -1;
+    *fallback++ = '\0';
+    if (strchr(fallback, '|') != NULL ||
+        (strcmp(fallback, "spa") != 0 && strcmp(fallback, "files") != 0))
+      return -1;
+    StaticMountConfig mount = {0};
+    if (copy_value(mount.url_prefix, sizeof(mount.url_prefix), mount_value) != 0 ||
+        copy_value(mount.directory, sizeof(mount.directory), separator) != 0 ||
+        !safe_path_components(mount.url_prefix, 1) ||
+        mount.url_prefix[strlen(mount.url_prefix) - 1] == '/' ||
+        !safe_path_components(mount.directory, 0))
+      return -1;
+    mount.spa_fallback = strcmp(fallback, "spa") == 0;
+    for (size_t index = 0; index < config->static_mount_count; index++) {
+      if (strcmp(config->static_mounts[index].url_prefix, mount.url_prefix) == 0)
+        return -1;
+    }
+    config->static_mounts[config->static_mount_count++] = mount;
+    return 0;
+  }
   if (strcmp(key, "tls_enabled") == 0) {
     return parse_bool(value, &config->tls_enabled);
   }
@@ -95,6 +151,9 @@ static int set_value(ServerConfig *config, const char *key, const char *value) {
   if (strcmp(key, "max_static_file_size_mb") == 0) {
     return parse_int(value, 1, 256, &config->max_static_file_size_mb);
   }
+  if (strcmp(key, "signup_enabled") == 0) {
+    return parse_bool(value, &config->signup_enabled);
+  }
   if (strcmp(key, "cups_server") == 0) {
     if (value[0] == '\0')
       return -1;
@@ -135,6 +194,9 @@ static int set_value(ServerConfig *config, const char *key, const char *value) {
   if (strcmp(key, "log_file") == 0) {
     return parse_bool(value, &config->log_file);
   }
+  if (strcmp(key, "log_retention_days") == 0) {
+    return parse_int(value, 1, 3650, &config->log_retention_days);
+  }
   return -1;
 }
 
@@ -145,6 +207,7 @@ void config_defaults(ServerConfig *config) {
   config->log_level = LOG_INFO;
   config->log_console = 1;
   config->log_file = 1;
+  config->log_retention_days = 30;
   config->port = 8080;
   config->worker_threads = 4;
   snprintf(config->host, sizeof(config->host), "%s", "0.0.0.0");
@@ -159,6 +222,7 @@ void config_defaults(ServerConfig *config) {
   snprintf(config->default_mime_type, sizeof(config->default_mime_type), "%s",
            "application/octet-stream");
   config->max_static_file_size_mb = 64;
+  config->signup_enabled = 0;
   config->cups_server[0] = '\0';
   config->cups_encryption_required = 0;
   snprintf(config->database_path, sizeof(config->database_path), "%s",

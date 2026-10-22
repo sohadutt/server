@@ -29,6 +29,29 @@ typedef struct {
   int active;
 } DataUser;
 
+#define DATA_PRINT_PRINTER_CAPACITY 256U
+#define DATA_PRINT_FORMAT_CAPACITY 64U
+#define DATA_PRINT_SIDES_CAPACITY 32U
+#define DATA_PRINT_PAGES_CAPACITY 256U
+#define DATA_PRINT_BATCH_CAPACITY 65U
+#define DATA_PRINT_NAME_CAPACITY 256U
+#define DATA_PRINT_REQUEST_CAPACITY 65U
+
+typedef struct {
+  int64_t id;
+  int cups_job_id;
+  int copies;
+  int64_t created_at;
+  char printer[DATA_PRINT_PRINTER_CAPACITY];
+  char format[DATA_PRINT_FORMAT_CAPACITY];
+  char sides[DATA_PRINT_SIDES_CAPACITY];
+  char pages[DATA_PRINT_PAGES_CAPACITY];
+  char batch_id[DATA_PRINT_BATCH_CAPACITY];
+  char document_name[DATA_PRINT_NAME_CAPACITY];
+  char request_id[DATA_PRINT_REQUEST_CAPACITY];
+  char status[24];
+} DataPrintJob;
+
 /* Opens or creates a private SQLite database and initializes its schema. */
 DataStore *data_store_open(const char *path);
 void data_store_close(DataStore *store);
@@ -70,5 +93,26 @@ DataResult data_credit_add(DataStore *store, const char *phone_e164,
 DataResult data_credit_charge(DataStore *store, const char *phone_e164,
                               int64_t credits, const char *reference,
                               const char *note, int64_t *balance_after);
+
+/* Stores accepted CUPS jobs and returns them only to their owning account. */
+DataResult data_print_job_record(DataStore *store, const char *phone_e164,
+                                 int cups_job_id, const char *printer,
+                                 const char *format, int copies,
+                                 const char *sides, const char *pages,
+                                 const char *batch_id,
+                                 const char *document_name,
+                                 const char *request_id,
+                                 int64_t *job_id);
+DataResult data_print_job_list(DataStore *store, const char *phone_e164,
+                               DataPrintJob **jobs, size_t *count);
+DataResult data_print_job_get(DataStore *store, const char *phone_e164,
+                              int64_t job_id, DataPrintJob *job);
+DataResult data_print_job_find_request(DataStore *store,
+                                       const char *phone_e164,
+                                       const char *request_id,
+                                       DataPrintJob *job);
+DataResult data_print_job_set_status(DataStore *store, const char *phone_e164,
+                                     int64_t job_id, const char *status);
+void data_print_job_list_free(DataPrintJob *jobs);
 
 #endif

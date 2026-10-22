@@ -42,3 +42,11 @@ for destination enumeration callbacks and their update/removal flags.
 Once a queue exists, `cups_server` and `cups_encryption_required` in the
 server config control how this application connects to the scheduler. These
 settings do not configure printer hardware or CUPS itself.
+
+Print submissions carry an opaque request correlation key in the CUPS job
+title. If the server stops between CUPS accepting a job and SQLite recording
+it, retrying the same request can restore the database row while CUPS retains
+the job history. This recovery is best effort; do not disable CUPS job history
+if you need this retry protection. CUPS and SQLite cannot participate in one
+atomic transaction, so operators should still review CUPS and application job
+history after an unclean shutdown.

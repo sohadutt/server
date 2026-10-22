@@ -40,6 +40,37 @@ input[type="file"]::file-selector-button { min-height: 36px; margin-right: 10px;
 .options { display: grid; grid-template-columns: minmax(96px, .65fr) minmax(0, 1.35fr); gap: 14px; margin: 4px 0 20px; }
 .options .field-label { margin-top: 0; }
 .options input, .options select { min-width: 0; }
+.document-list { display: grid; gap: 12px; margin: 14px 0 22px; }
+.document-card { min-width: 0; padding: 16px; border: 1px solid #e1e6ed; border-radius: 12px; background: #fbfcfe; }
+.document-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+.document-title { min-width: 0; margin: 0; font-size: 14px; font-weight: 700; overflow-wrap: anywhere; }
+.document-meta { margin: 4px 0 0; color: #687589; font-size: 12px; }
+.document-card .options { margin-bottom: 14px; }
+.document-card .field-label { margin-top: 0; }
+.document-card .pages-field { margin-bottom: 0; }
+button.icon-button { flex: 0 0 auto; width: auto; min-height: 36px; margin: 0; padding: 6px 9px; border: 1px solid #e1caca; background: #fff; color: #9a3030; font-size: 12px; }
+button.icon-button:hover { background: #fff4f4; }
+.advanced-settings { margin: 0 0 18px; border: 1px solid #e1e6ed; border-radius: 10px; padding: 13px 14px; }
+.advanced-settings summary { cursor: pointer; color: #34445a; font-size: 14px; font-weight: 700; }
+.check-field { display: flex; align-items: flex-start; gap: 10px; margin: 16px 0; color: #46576b; font-size: 13px; line-height: 1.45; }
+.check-field input { flex: 0 0 auto; width: 18px; min-height: 18px; height: 18px; margin: 0; accent-color: #245ccc; }
+.advanced-options { margin-bottom: 8px; }
+.advanced-settings .hint { margin-bottom: 2px; }
+.job-history { margin-top: 28px; border-top: 1px solid #e8ecf1; padding-top: 20px; }
+.history-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.history-heading h2 { font-size: 18px; }
+.history-heading button.text-button { font-size: 13px; }
+.jobs-list { display: grid; gap: 10px; }
+.job-batch { padding: 13px; border: 1px solid #e1e6ed; border-radius: 10px; background: #fbfcfe; }
+.job-batch-title { margin: 0 0 8px; font-size: 13px; font-weight: 700; }
+.job-entry { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 4px 8px; padding-top: 8px; border-top: 1px solid #e8ecf1; font-size: 12px; }
+.job-entry + .job-entry { margin-top: 8px; }
+.job-entry-name { min-width: 0; overflow-wrap: anywhere; font-weight: 600; }
+.job-entry-detail { grid-column: 1; color: #687589; overflow-wrap: anywhere; }
+.job-status { grid-column: 2; grid-row: 1 / span 2; align-self: center; color: #46576b; text-transform: capitalize; }
+.job-entry button.job-cancel { grid-column: 3; grid-row: 1 / span 2; align-self: center; min-height: 32px; padding: 4px 7px; }
+.job-status[data-status="failed"], .job-status[data-status="canceled"] { color: #a52a2a; }
+.job-status[data-status="completed"] { color: #176b45; }
 button { width: 100%; min-height: 50px; margin-top: 8px; border: 0; border-radius: 9px; padding: 12px 16px; background: #245ccc; color: white; font: inherit; font-weight: 700; cursor: pointer; }
 button:hover { background: #194daF; }
 button:disabled { cursor: wait; opacity: .65; }
@@ -57,4 +88,5 @@ footer { margin-top: 18px; color: #687589; font-size: 12px; text-align: center; 
   .eyebrow { margin-top: 26px; }
   .print-card { padding: 18px; border-radius: 13px; }
   .options { grid-template-columns: 1fr; gap: 16px; }
+  .document-card { padding: 13px; }
 }

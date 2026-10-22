@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <openssl/crypto.h>
+#include <openssl/rand.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -38,6 +39,10 @@ typedef struct {
   char copies[16];
   char sides[64];
   char pages[256];
+  char batch_id[DATA_PRINT_BATCH_CAPACITY];
+  char document_name[DATA_PRINT_NAME_CAPACITY];
+  char request_id[DATA_PRINT_REQUEST_CAPACITY];
+  char pages_applied[8];
   int pages_seen;
 } PrintRequestHeaders;
 
@@ -98,6 +103,18 @@ static int parse_headers(const HttpRequest *request,
       {.name = "x-print-pages",
        .value = headers->pages,
        .capacity = sizeof(headers->pages)},
+      {.name = "x-print-batch-id",
+       .value = headers->batch_id,
+       .capacity = sizeof(headers->batch_id)},
+      {.name = "x-print-name",
+       .value = headers->document_name,
+       .capacity = sizeof(headers->document_name)},
+      {.name = "x-print-request-id",
+       .value = headers->request_id,
+       .capacity = sizeof(headers->request_id)},
+      {.name = "x-print-pages-applied",
+       .value = headers->pages_applied,
+       .capacity = sizeof(headers->pages_applied)},
   };
 
   size_t position = 0;
@@ -169,6 +186,57 @@ static int parse_headers(const HttpRequest *request,
   }
   headers->pages_seen = values[4].seen;
   return content_length_seen ? 0 : -1;
+}
+
+static int normalize_batch_id(const char *input, char output[65]) {
+  size_t length = strlen(input);
+  if (length == 0) {
+    unsigned char random_bytes[16];
+    static const char hex[] = "0123456789abcdef";
+    if (RAND_bytes(random_bytes, sizeof(random_bytes)) != 1)
+      return -1;
+    for (size_t i = 0; i < sizeof(random_bytes); i++) {
+      output[i * 2] = hex[random_bytes[i] >> 4];
+      output[i * 2 + 1] = hex[random_bytes[i] & 0x0fU];
+    }
+    output[32] = '\0';
+    OPENSSL_cleanse(random_bytes, sizeof(random_bytes));
+    return 0;
+  }
+  if (length >= DATA_PRINT_BATCH_CAPACITY)
+    return -1;
+  for (size_t i = 0; i < length; i++) {
+    unsigned char c = (unsigned char)input[i];
+    if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+          (c >= '0' && c <= '9') || c == '-'))
+      return -1;
+  }
+  memcpy(output, input, length + 1);
+  return 0;
+}
+
+static void normalize_document_name(const char *input, char output[256]) {
+  size_t used = 0;
+  const char *base = input;
+  for (const char *cursor = input; *cursor != '\0'; cursor++) {
+    if (*cursor == '/' || *cursor == '\\')
+      base = cursor + 1;
+  }
+  for (const unsigned char *cursor = (const unsigned char *)base;
+       *cursor != '\0' && used < 254; cursor++) {
+    unsigned char c = *cursor;
+    output[used++] = ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                      (c >= '0' && c <= '9') || c == '.' || c == '-' ||
+                      c == '_')
+                         ? (char)c
+                         : '_';
+  }
+  while (used > 0 && output[used - 1] == '.')
+    used--;
+  if (used == 0)
+    memcpy(output, "document", sizeof("document"));
+  else
+    output[used] = '\0';
 }
 
 static int bearer_token(const char *header, char token[256]) {
@@ -325,10 +393,91 @@ static size_t send_json(HttpTransport *transport, int status,
                             strlen(json));
 }
 
+static void make_cups_job_title(char *title, size_t capacity,
+                                const DataUser *user,
+                                const PrintRequestHeaders *headers) {
+  if (title == NULL || capacity == 0 || user == NULL || headers == NULL)
+    return;
+  char prefix[128];
+  int prefix_length = snprintf(prefix, sizeof(prefix), "serverjob:%lld:%s:",
+                               (long long)user->id, headers->request_id);
+  if (prefix_length < 0 || (size_t)prefix_length >= sizeof(prefix)) {
+    title[0] = '\0';
+    return;
+  }
+  size_t used = (size_t)prefix_length;
+  size_t name_length = strlen(headers->document_name);
+  if (used >= capacity)
+    used = capacity - 1;
+  memcpy(title, prefix, used);
+  size_t available = capacity - used - 1;
+  if (name_length > available)
+    name_length = available;
+  memcpy(title + used, headers->document_name, name_length);
+  title[used + name_length] = '\0';
+}
+
+/*
+ * Recover the CUPS-accepted/SQLite-not-yet-recorded crash window on a retry.
+ * CUPS must retain the job in its history for this best-effort lookup to work.
+ */
+static int recover_cups_job(const DataUser *user,
+                            const PrintRequestHeaders *headers, int copies,
+                            const char *media_type, DataStore *data_store,
+                            char *printer_name, size_t printer_capacity,
+                            int *cups_job_id, int64_t *stored_job_id) {
+  char prefix[128];
+  int written = snprintf(prefix, sizeof(prefix), "serverjob:%lld:%s:",
+                         (long long)user->id, headers->request_id);
+  if (written < 0 || (size_t)written >= sizeof(prefix))
+    return -1;
+
+  cups_job_t *jobs = NULL;
+  int count = cupsGetJobs2(CUPS_HTTP_DEFAULT, &jobs, NULL, 0,
+                           CUPS_WHICHJOBS_ALL);
+  int result = -1;
+  if (count > 0 && jobs != NULL) {
+    for (int index = 0; index < count; index++) {
+      cups_job_t *job = &jobs[index];
+      if (job->title == NULL || job->dest == NULL ||
+          strncmp(job->title, prefix, (size_t)written) != 0 ||
+          strlen(job->dest) >= printer_capacity)
+        continue;
+      DataResult recorded = data_print_job_record(
+          data_store, user->phone_e164, job->id, job->dest, media_type, copies,
+          headers->sides[0] != '\0' ? headers->sides : "one-sided",
+          headers->pages_seen ? headers->pages : "", headers->batch_id,
+          headers->document_name, headers->request_id, stored_job_id);
+      if (recorded == DATA_DUPLICATE) {
+        DataPrintJob existing = {0};
+        if (data_print_job_find_request(data_store, user->phone_e164,
+                                        headers->request_id,
+                                        &existing) == DATA_OK &&
+            existing.cups_job_id == job->id &&
+            strcmp(existing.printer, job->dest) == 0) {
+          *stored_job_id = existing.id;
+          recorded = DATA_OK;
+        }
+        OPENSSL_cleanse(&existing, sizeof(existing));
+      }
+      if (recorded == DATA_OK) {
+        memcpy(printer_name, job->dest, strlen(job->dest) + 1);
+        *cups_job_id = job->id;
+        result = 0;
+      }
+      break;
+    }
+  }
+  if (jobs != NULL && count > 0)
+    cupsFreeJobs(count, jobs);
+  return result;
+}
+
 static int submit_document(FILE *file, const PrintRequestHeaders *headers,
                            int copies, const char *media_type,
+                           const char *phone_e164, DataStore *data_store,
                            char *printer_name, size_t printer_name_capacity,
-                           int *job_id) {
+                           int *job_id, int64_t *stored_job_id) {
   PrintService service = {0};
   print_service_init(&service);
   cups_dest_t *destination = NULL;
@@ -363,7 +512,7 @@ static int submit_document(FILE *file, const PrintRequestHeaders *headers,
   option_count = cupsAddOption("sides", sides, option_count, &options);
   if (option_count != previous_count + 1)
     goto cleanup;
-  if (headers->pages_seen) {
+  if (headers->pages_seen && strcmp(headers->pages_applied, "true") != 0) {
     previous_count = option_count;
     option_count =
         cupsAddOption("page-ranges", headers->pages, option_count, &options);
@@ -377,14 +526,23 @@ static int submit_document(FILE *file, const PrintRequestHeaders *headers,
       goto cleanup;
   }
 
+  char cups_title[256];
+  DataUser title_user = {0};
+  if (data_user_get(data_store, phone_e164, &title_user) != DATA_OK)
+    goto cleanup;
+  make_cups_job_title(cups_title, sizeof(cups_title), &title_user, headers);
+  OPENSSL_cleanse(&title_user, sizeof(title_user));
+  if (cups_title[0] == '\0')
+    goto cleanup;
   ipp_status_t status =
       cupsCreateDestJob(CUPS_HTTP_DEFAULT, destination, info, job_id,
-                        "Browser Print", option_count, options);
+                        cups_title, option_count, options);
+  OPENSSL_cleanse(cups_title, sizeof(cups_title));
   if (status != IPP_STATUS_OK && status != IPP_STATUS_OK_IGNORED_OR_SUBSTITUTED)
     goto cleanup;
   created = 1;
   if (cupsStartDestDocument(CUPS_HTTP_DEFAULT, destination, info, *job_id,
-                            "uploaded-document", media_type, 0, NULL,
+                            headers->document_name, media_type, 0, NULL,
                             1) != HTTP_STATUS_CONTINUE)
     goto cleanup;
 
@@ -402,6 +560,15 @@ static int submit_document(FILE *file, const PrintRequestHeaders *headers,
     goto cleanup;
 
   memcpy(printer_name, selected->name, strlen(selected->name) + 1);
+  if (data_print_job_record(data_store, phone_e164, *job_id, selected->name,
+                            media_type, copies, sides,
+                            headers->pages_seen ? headers->pages : "",
+                            headers->batch_id, headers->document_name,
+                            headers->request_id,
+                            stored_job_id) != DATA_OK) {
+    log_error("Print job was accepted by CUPS but could not be saved");
+    goto cleanup;
+  }
   result = 0;
 
 cleanup:
@@ -439,6 +606,91 @@ static size_t json_escape(char *output, size_t capacity, const char *input) {
   }
   output[used] = '\0';
   return used;
+}
+
+static size_t send_job_result(HttpTransport *transport, int status,
+                              const char *reason, int64_t stored_job_id,
+                              int cups_job_id, const char *printer,
+                              const char *batch_id) {
+  char escaped_name[512];
+  char escaped_batch[DATA_PRINT_BATCH_CAPACITY * 2];
+  if (json_escape(escaped_name, sizeof(escaped_name), printer) == 0 ||
+      json_escape(escaped_batch, sizeof(escaped_batch), batch_id) == 0)
+    return send_json(transport, 500, "Internal Server Error",
+                     "{\"error\":\"Print response encoding failed\"}");
+  char body[1024];
+  snprintf(body, sizeof(body),
+           "{\"job_id\":%lld,\"cups_job_id\":%d,\"printer\":\"%s\","
+           "\"batch_id\":\"%s\"}",
+           (long long)stored_job_id, cups_job_id, escaped_name, escaped_batch);
+  return send_json(transport, status, reason, body);
+}
+
+static const char *cups_job_status(ipp_jstate_t state) {
+  switch (state) {
+  case IPP_JSTATE_PENDING:
+  case IPP_JSTATE_HELD:
+    return "submitted";
+  case IPP_JSTATE_PROCESSING:
+    return "processing";
+  case IPP_JSTATE_COMPLETED:
+    return "completed";
+  case IPP_JSTATE_CANCELED:
+    return "canceled";
+  case IPP_JSTATE_ABORTED:
+  case IPP_JSTATE_STOPPED:
+  default:
+    return "failed";
+  }
+}
+
+void print_api_sync_jobs(DataStore *data_store, const char *phone_e164) {
+  if (data_store == NULL || phone_e164 == NULL)
+    return;
+  DataPrintJob *stored_jobs = NULL;
+  size_t stored_count = 0;
+  if (data_print_job_list(data_store, phone_e164, &stored_jobs,
+                          &stored_count) != DATA_OK)
+    return;
+  cups_job_t *cups_jobs = NULL;
+  int cups_count = cupsGetJobs2(CUPS_HTTP_DEFAULT, &cups_jobs, NULL, 0,
+                                CUPS_WHICHJOBS_ALL);
+  if (cups_count > 0 && cups_jobs != NULL) {
+    for (size_t i = 0; i < stored_count; i++) {
+      for (int j = 0; j < cups_count; j++) {
+        if (cups_jobs[j].id == stored_jobs[i].cups_job_id &&
+            cups_jobs[j].dest != NULL &&
+            strcmp(cups_jobs[j].dest, stored_jobs[i].printer) == 0) {
+          (void)data_print_job_set_status(
+              data_store, phone_e164, stored_jobs[i].id,
+              cups_job_status(cups_jobs[j].state));
+          break;
+        }
+      }
+    }
+  }
+  if (cups_jobs != NULL && cups_count > 0)
+    cupsFreeJobs(cups_count, cups_jobs);
+  data_print_job_list_free(stored_jobs);
+}
+
+DataResult print_api_cancel_job(DataStore *data_store, const char *phone_e164,
+                                int64_t job_id) {
+  DataPrintJob job = {0};
+  DataResult result =
+      data_print_job_get(data_store, phone_e164, job_id, &job);
+  if (result != DATA_OK)
+    return result;
+  if (strcmp(job.status, "completed") == 0 ||
+      strcmp(job.status, "canceled") == 0 ||
+      strcmp(job.status, "failed") == 0)
+    return DATA_INVALID;
+  ipp_status_t status = cupsCancelJob2(CUPS_HTTP_DEFAULT, job.printer,
+                                       job.cups_job_id, 0);
+  if (status != IPP_STATUS_OK &&
+      status != IPP_STATUS_OK_IGNORED_OR_SUBSTITUTED)
+    return DATA_ERROR;
+  return data_print_job_set_status(data_store, phone_e164, job_id, "canceled");
 }
 
 size_t print_api_handle(HttpTransport *transport, const HttpRequest *request,
@@ -489,8 +741,41 @@ size_t print_api_handle(HttpTransport *transport, const HttpRequest *request,
     reason = "Unsupported Media Type";
   }
 
+  if (failure == NULL &&
+      (normalize_batch_id(headers.batch_id, headers.batch_id) != 0 ||
+       normalize_batch_id(headers.request_id, headers.request_id) != 0)) {
+    failure = "Invalid print batch or request identifier";
+    status = 400;
+    reason = "Bad Request";
+  }
+  if (failure == NULL) {
+    char supplied_name[DATA_PRINT_NAME_CAPACITY];
+    memcpy(supplied_name, headers.document_name, sizeof(supplied_name));
+    normalize_document_name(supplied_name, headers.document_name);
+    OPENSSL_cleanse(supplied_name, sizeof(supplied_name));
+    DataPrintJob previous = {0};
+    DataResult previous_result = data_print_job_find_request(
+        data_store, user.phone_e164, headers.request_id, &previous);
+    if (previous_result == DATA_OK) {
+      response_bytes = send_job_result(transport, 200, "OK", previous.id,
+                                       previous.cups_job_id, previous.printer,
+                                       previous.batch_id);
+      OPENSSL_cleanse(&previous, sizeof(previous));
+      OPENSSL_cleanse(&user, sizeof(user));
+      OPENSSL_cleanse(token, sizeof(token));
+      return response_bytes;
+    }
+    OPENSSL_cleanse(&previous, sizeof(previous));
+    if (previous_result != DATA_NOT_FOUND) {
+      failure = "Could not check print request status";
+      status = 500;
+      reason = "Internal Server Error";
+    }
+  }
+
   if (failure == NULL && pthread_mutex_trylock(&print_submission_mutex) != 0) {
     OPENSSL_cleanse(token, sizeof(token));
+    OPENSSL_cleanse(&user, sizeof(user));
     return send_json(
         transport, 503, "Service Unavailable",
         "{\"error\":\"A print request is already being processed\"}");
@@ -500,6 +785,7 @@ size_t print_api_handle(HttpTransport *transport, const HttpRequest *request,
     snprintf(body, sizeof(body), "{\"error\":\"%s\"}", failure);
     response_bytes = send_json(transport, status, reason, body);
     OPENSSL_cleanse(token, sizeof(token));
+    OPENSSL_cleanse(&user, sizeof(user));
     return response_bytes;
   }
 
@@ -520,6 +806,13 @@ size_t print_api_handle(HttpTransport *transport, const HttpRequest *request,
       (strcmp(media_type, "application/pdf") != 0 ||
        !valid_pages(headers.pages))) {
     failure = "Page ranges require a PDF and use a format like 1-3,5";
+    status = 400;
+    reason = "Bad Request";
+  }
+  if (failure == NULL && headers.pages_applied[0] != '\0' &&
+      strcmp(headers.pages_applied, "true") != 0 &&
+      strcmp(headers.pages_applied, "false") != 0) {
+    failure = "Invalid page-range processing flag";
     status = 400;
     reason = "Bad Request";
   }
@@ -547,13 +840,22 @@ size_t print_api_handle(HttpTransport *transport, const HttpRequest *request,
 
   char printer_name[256] = {0};
   int job_id = 0;
-  if (failure == NULL &&
-      submit_document(upload, &headers, copies, media_type, printer_name,
-                      sizeof(printer_name), &job_id) != 0) {
-    log_warn("CUPS could not accept the submitted print document");
-    failure = "No available printer or CUPS submission failed";
-    status = 503;
-    reason = "Service Unavailable";
+  int64_t stored_job_id = 0;
+  int recovered = 0;
+  if (failure == NULL) {
+    recovered = recover_cups_job(&user, &headers, copies, media_type,
+                                 data_store, printer_name,
+                                 sizeof(printer_name), &job_id,
+                                 &stored_job_id) == 0;
+    if (!recovered &&
+        submit_document(upload, &headers, copies, media_type,
+                        user.phone_e164, data_store, printer_name,
+                        sizeof(printer_name), &job_id, &stored_job_id) != 0) {
+      log_warn("CUPS could not accept the submitted print document");
+      failure = "No available printer or CUPS submission failed";
+      status = 503;
+      reason = "Service Unavailable";
+    }
   }
 
   if (upload != NULL)
@@ -563,22 +865,15 @@ size_t print_api_handle(HttpTransport *transport, const HttpRequest *request,
     snprintf(body, sizeof(body), "{\"error\":\"%s\"}", failure);
     response_bytes = send_json(transport, status, reason, body);
   } else {
-    char escaped_name[512];
-    char body[768];
-    if (json_escape(escaped_name, sizeof(escaped_name), printer_name) == 0) {
-      response_bytes =
-          send_json(transport, 500, "Internal Server Error",
-                    "{\"error\":\"Print response encoding failed\"}");
-    } else {
-      snprintf(body, sizeof(body), "{\"job_id\":%d,\"printer\":\"%s\"}", job_id,
-               escaped_name);
-      response_bytes = send_json(transport, 201, "Created", body);
-      char message[384];
-      snprintf(message, sizeof(message), "Submitted print job %d", job_id);
-      log_info(message);
-    }
+    response_bytes = send_job_result(transport, recovered ? 200 : 201,
+                                     recovered ? "OK" : "Created", stored_job_id,
+                                     job_id, printer_name, headers.batch_id);
+    char message[384];
+    snprintf(message, sizeof(message), "Submitted print job %d", job_id);
+    log_info(message);
   }
   pthread_mutex_unlock(&print_submission_mutex);
   OPENSSL_cleanse(token, sizeof(token));
+  OPENSSL_cleanse(&user, sizeof(user));
   return response_bytes;
 }

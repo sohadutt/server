@@ -41,6 +41,14 @@ password reset and account deactivation revoke existing tokens. The browser
 keeps its token in memory rather than browser storage, so refreshing the page
 requires another login.
 
+Each bearer token is rate-limited independently using its SHA-256 digest: 120
+requests for a verified active session and 3 print submissions per minute.
+Invalid or revoked tokens do not allocate session-limit entries; they remain
+covered by the per-client API limit. Limits are in-process and reset on
+restart. Admins can revoke one session through
+`POST /api/admin/users/token/revoke`; the database retains only the token hash
+and revocation timestamp, and authentication rejects it immediately.
+
 Bearer tokens are **copyable credentials**. Anyone who obtains a valid token
 can replay it as that user until it expires or is revoked. TLS, memory-only
 browser storage, redacted authorization logging, and token revocation reduce
@@ -49,13 +57,22 @@ sender-constrained tokens. Malware, a malicious browser extension, or an
 injection flaw that executes script in the site can still access a token while
 the page is running.
 
-Phone numbers are account identifiers, not verified identity. Signup does not
-send an SMS or prove control of the number. A new signup can claim an unused
-number, so enable a phone verification flow before relying on phone ownership
-to identify a person. The service also has no multi-factor authentication or
-login rate limiter. Use unique passwords; deployments exposed to untrusted
-networks should add rate limiting at a trusted reverse proxy and consider
-MFA or verified phone challenges.
+Phone numbers are account identifiers, not verified identity. Public signup is
+disabled by default with `signup_enabled = false`; administrators can create
+accounts. Enabling signup does not send an SMS or prove control of the number,
+so limit it to trusted development until an SMS verification provider is
+configured. The service does not have multi-factor authentication.
+Login, signup, and admin routes have in-process per-client limits of 12, 5,
+and 30 requests per 60 seconds, and remaining API traffic is capped at 300 per
+client per minute. Malformed HTTP requests get at most 10 error responses per
+client per minute, after which the server silently closes the connection.
+These limits are memory-only, reset on restart,
+and are not shared between server instances; public multi-instance deployments
+should also enforce limits at a trusted edge.
+
+Printed QR codes contain only the internal numeric user ID, not the phone
+number. They are unsigned lookup hints and must never be accepted as proof of
+identity or as an authentication credential.
 
 The admin API uses a configured bearer secret of at least 32 characters and a
 constant-time comparison. Keep it private. The CLI account manager accesses
@@ -65,9 +82,12 @@ account control access to that tool.
 ## HTTP parsing and injection defenses
 
 The server accepts HTTP/1.0 and HTTP/1.1 request lines with origin-form paths.
-It bounds request headers, applies connection and header-read timeouts, rejects
-ambiguous or repeated `Content-Length` values, and rejects `Transfer-Encoding`
-rather than trying to support chunked requests. JSON routes have a small body
+It bounds request headers, applies connection and header-read timeouts, and
+rejects invalid request-line/header syntax, repeated `Host` or
+`Content-Length`, ambiguous body lengths, and `Transfer-Encoding` rather than
+trying to support chunked requests. Malformed requests receive at most 10
+`400 Bad Request` responses per client address per minute; further malformed
+connections are closed without a response. JSON routes have a small body
 limit, validate an explicit set of fields, reject duplicate and unknown fields,
 and reject unsupported JSON escapes. User values are bound as SQLite
 parameters; they are not concatenated into SQL statements.
@@ -111,6 +131,15 @@ its access to trusted queues and devices. Print costs are not charged by this
 endpoint yet; define pricing and atomically debit credits before treating the
 service as a paid print system.
 
+Successful submissions are saved in SQLite print history and can be read only
+by the owning account through `GET /api/jobs`. The recorded status means CUPS
+accepted the job. Job history refresh reads current CUPS state and active jobs
+can be canceled by their owner. Request IDs embedded in CUPS job titles help
+recover a missing SQLite record on retry, provided CUPS still retains the job.
+This cross-system recovery is best effort and cannot provide exactly-once
+printing after CUPS history is purged. Include the SQLite database in the
+deployment's normal backup schedule.
+
 ## Deployment checklist
 
 - Use a trusted CA certificate for the hostname clients actually use; do not
@@ -123,7 +152,7 @@ service as a paid print system.
   writes it to `build/local-setup/admin.token` with mode `0600`.
 - Keep debug logs private and avoid placing credentials in URLs or loggable
   request targets.
-- Verify phone ownership and add login rate limits/MFA before public signup.
+- Verify phone ownership and add MFA before public signup.
 - Keep CUPS, OpenSSL, SQLite, the compiler, and host operating system updated.
 
 See the [TLS guide](tls.md), [setup guide](setup.md), and

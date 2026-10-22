@@ -2,9 +2,11 @@
 *.d
 .cache
 build
+public/apps/
 logs
 data/
 certs
+__pycache__
 # Object files
 *.o
 *.ko

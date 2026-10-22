@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [none, address-undefined]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.30.6'
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libcups2-dev libsqlite3-dev libssl-dev python3
+      - name: Configure
+        env:
+          SANITIZER: ${{ matrix.sanitizer }}
+        run: |
+          if [ "$SANITIZER" = address-undefined ]; then
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug \
+              -DCMAKE_C_FLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer' \
+              -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address,undefined'
+          else
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          fi
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        env:
+          ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --test-dir build --output-on-failure
+
+  fuzz-http-parser:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.30.6'
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes clang libcups2-dev libsqlite3-dev libssl-dev python3
+      - name: Build fuzz target
+        run: |
+          CC=clang cmake -S . -B build-fuzz -DENABLE_FUZZING=ON -DBUILD_TESTING=OFF
+          cmake --build build-fuzz --target fuzz_http_parser --parallel
+      - name: Fuzz HTTP request parser
+        run: ./build-fuzz/fuzz_http_parser -max_total_time=10 -print_final_stats=1

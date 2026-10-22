@@ -55,22 +55,12 @@ def connect_database(path: Path) -> sqlite3.Connection:
     database.execute("PRAGMA foreign_keys = ON")
     database.execute("PRAGMA busy_timeout = 5000")
     version = database.execute("PRAGMA user_version").fetchone()[0]
-    if version == 1:
-        try:
-            database.execute("BEGIN EXCLUSIVE")
-            database.execute("ALTER TABLE users ADD COLUMN password_salt BLOB")
-            database.execute("ALTER TABLE users ADD COLUMN password_hash BLOB")
-            database.execute("PRAGMA user_version = 2")
-            database.commit()
-            version = 2
-            print("Migrated database schema from version 1 to 2.")
-        except sqlite3.Error:
-            database.rollback()
-            database.close()
-            raise
-    if version != 2:
+    if version != 5:
         database.close()
-        raise RuntimeError(f"unsupported database schema version {version}; expected 2")
+        raise RuntimeError(
+            f"unsupported database schema version {version}; expected 5. "
+            "Start the current server once to apply database migrations."
+        )
     return database
 
 

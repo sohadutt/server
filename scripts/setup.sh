@@ -14,6 +14,7 @@ Usage:
   scripts/setup.sh cert [options]      Create a development TLS certificate
   scripts/setup.sh cups ACTION         Manage CUPS and printer queues
   scripts/setup.sh server [options]    Build and run a configured server
+  scripts/setup.sh static ACTION       Build and publish Vite/static apps
 
 Run options:
   --bind ADDRESS  Address to listen on (default: 127.0.0.1)
@@ -37,6 +38,16 @@ Server:
   setup.sh server [config-file]
   setup.sh server --native-tls [config-file]
   setup.sh server --tls [config-file]  Use optional local Caddy proxy
+
+Static Vite applications:
+  setup.sh static build NAME SOURCE_DIR [https://your-domain]
+  setup.sh static add NAME DIST_DIR [https://your-domain]
+  setup.sh static list
+  setup.sh static remove NAME
+
+`build` runs `npm ci` and `npm run build -- --base=/NAME/`, then installs the
+Vite `dist/` output. `add` installs an already-built directory. Both publish
+the app at `/NAME/` and enable SPA route fallback.
 HELP
 }
 
@@ -235,6 +246,140 @@ CADDY
   caddy run --config "$caddyfile" --adapter caddyfile
 }
 
+static_app_name_valid() {
+  [[ "$1" =~ ^[a-z][a-z0-9-]{0,47}$ ]]
+}
+
+static_command() {
+  local action="${1:-}"; shift || true
+  local apps_dir="$project_dir/public/apps"
+  local config_file="$project_dir/config/server.conf"
+  case "$action" in
+    build|add)
+      (($# >= 2 && $# <= 3)) || {
+        printf 'Usage: setup.sh static %s NAME %s [https://your-domain]\n' \
+          "$action" "$([[ $action == build ]] && printf SOURCE_DIR || printf DIST_DIR)" >&2
+        return 2
+      }
+      local name="$1" input_dir="$2" public_origin="${3:-}"
+      local source_dir temp_dir final_dir config_tmp backup_dir mount_line origin_display
+      static_app_name_valid "$name" || {
+        printf 'App name must start with a lowercase letter and contain only lowercase letters, digits, and hyphens (max 48 chars).\n' >&2
+        return 2
+      }
+      if [[ -n "$public_origin" ]]; then
+        [[ "$public_origin" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || {
+          printf 'Public origin must be an HTTPS origin such as https://print.example.com.\n' >&2
+          return 2
+        }
+        origin_display="$public_origin"
+      else
+        origin_display='https://<your-domain>'
+      fi
+      [[ -d "$input_dir" ]] || { printf 'Directory not found: %s\n' "$input_dir" >&2; return 1; }
+      source_dir="$(cd -- "$input_dir" && pwd -P)"
+      if [[ "$action" == build ]]; then
+        require_command npm || return
+        [[ -f "$source_dir/package.json" ]] || { printf 'Vite source must contain package.json: %s\n' "$source_dir" >&2; return 1; }
+        if [[ -f "$source_dir/package-lock.json" || -f "$source_dir/npm-shrinkwrap.json" ]]; then
+          (cd "$source_dir" && npm ci && npm run build -- "--base=/$name/") || return
+        else
+          printf 'Refusing a non-reproducible dependency install: commit package-lock.json or npm-shrinkwrap.json first.\n' >&2
+          return 1
+        fi
+        source_dir="$source_dir/dist"
+      fi
+      [[ -d "$source_dir" && -f "$source_dir/index.html" ]] || {
+        printf 'Build directory must contain index.html: %s\n' "$source_dir" >&2
+        return 1
+      }
+      [[ -z "$(find "$source_dir" -type l -print -quit)" ]] || {
+        printf 'Static build contains symbolic links; remove them before publishing.\n' >&2
+        return 1
+      }
+      mkdir -p "$apps_dir"
+      final_dir="$apps_dir/$name"
+      mount_line="static_mount = /$name|apps/$name|spa"
+      if [[ "$action" == add && ( -e "$final_dir" || "$(grep -Fxc "$mount_line" "$config_file" || true)" != 0 ) ]]; then
+        printf 'Static app already exists: %s. Use static build to replace its deployment.\n' "$name" >&2
+        return 1
+      fi
+      if [[ "$action" == build ]]; then
+        if [[ -e "$final_dir" ]] && [[ "$(grep -Fxc "$mount_line" "$config_file" || true)" != 1 ]]; then
+          printf 'Existing app directory has no matching config mount; refusing to overwrite it.\n' >&2
+          return 1
+        fi
+        if [[ ! -e "$final_dir" ]] && [[ "$(grep -Fxc "$mount_line" "$config_file" || true)" != 0 ]]; then
+          printf 'Config has a mount for %s but its installed directory is missing. Repair it with static add.\n' "$name" >&2
+          return 1
+        fi
+      fi
+      temp_dir="$(mktemp -d "$apps_dir/.${name}.XXXXXX")"
+      config_tmp=""
+      if ! cp -R "$source_dir/." "$temp_dir/" ||
+         [[ ! -f "$temp_dir/index.html" ]] ||
+         [[ -n "$(find "$temp_dir" -type l -print -quit)" ]]; then
+        rm -rf -- "$temp_dir"; rm -f -- "$config_tmp"
+        printf 'Could not validate the copied static build.\n' >&2
+        return 1
+      fi
+      if [[ ! -e "$final_dir" ]]; then
+        config_tmp="$(mktemp "$project_dir/config/.server.conf.XXXXXX")"
+        if ! cat "$config_file" > "$config_tmp" ||
+           ! printf '\n# Static SPA: %s\n%s\n' "$name" "$mount_line" >> "$config_tmp"; then
+          rm -rf -- "$temp_dir"; rm -f -- "$config_tmp"; return 1
+        fi
+        chmod 600 "$config_tmp"
+        if ! mv -- "$temp_dir" "$final_dir"; then
+          rm -rf -- "$temp_dir"; rm -f -- "$config_tmp"; return 1
+        fi
+        if ! mv -- "$config_tmp" "$config_file"; then
+          rm -rf -- "$final_dir"; rm -f -- "$config_tmp"; return 1
+        fi
+      else
+        backup_dir="$(mktemp -d "$apps_dir/.${name}.backup.XXXXXX")"
+        rmdir "$backup_dir"
+        if ! mv -- "$final_dir" "$backup_dir"; then
+          rm -rf -- "$temp_dir"; return 1
+        fi
+        if ! mv -- "$temp_dir" "$final_dir"; then
+          mv -- "$backup_dir" "$final_dir" || true
+          rm -rf -- "$temp_dir"; return 1
+        fi
+        rm -rf -- "$backup_dir"
+      fi
+      printf 'Installed %s at %s/%s/\n' "$name" "$origin_display" "$name"
+      printf 'Static directory: %s\nConfiguration updated: %s\n' "$final_dir" "$config_file"
+      printf 'Restart the server to load a new mount. Run static build again with a later Vite build to replace this deployment.\n'
+      ;;
+    list)
+      (($# == 0)) || { printf 'Usage: setup.sh static list\n' >&2; return 2; }
+      awk -F'[|=]' '/^[[:space:]]*static_mount[[:space:]]*=/ { path=$2; directory=$3; mode=$4; gsub(/[[:space:]]/, "", path); gsub(/[[:space:]]/, "", directory); gsub(/[[:space:]]/, "", mode); printf "https://<your-domain>%s/ -> public/%s (%s)\n", path, directory, mode }' "$config_file"
+      ;;
+    remove)
+      (($# == 1)) || { printf 'Usage: setup.sh static remove NAME\n' >&2; return 2; }
+      local name="$1" app_dir="$apps_dir/${1:-}" config_tmp answer
+      static_app_name_valid "$name" || { printf 'Invalid static app name.\n' >&2; return 2; }
+      grep -Fq "static_mount = /$name|apps/$name|spa" "$config_file" || {
+        printf 'No configured static app named %s.\n' "$name" >&2; return 1
+      }
+      printf 'Remove the /%s/ mount and its deployed files at %s? [y/N] ' "$name" "$app_dir"
+      IFS= read -r answer || answer=""
+      [[ "$answer" == y || "$answer" == Y || "$answer" == yes || "$answer" == YES ]] || { printf 'Cancelled.\n'; return 0; }
+      config_tmp="$(mktemp "$project_dir/config/.server.conf.XXXXXX")"
+      awk -v expected="static_mount = /$name|apps/$name|spa" \
+        '{ line=$0; sub(/^[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line); if (line != expected) print $0 }' \
+        "$config_file" > "$config_tmp"
+      chmod 600 "$config_tmp"
+      mv -- "$config_tmp" "$config_file" || return
+      rm -rf -- "$app_dir"
+      printf 'Removed %s. Restart the server to apply the change.\n' "$name"
+      ;;
+    -h|--help|help) sed -n '/^Static Vite applications:/,/^$/p' < <(usage) ;;
+    *) printf 'Usage: setup.sh static {build NAME SOURCE_DIR [ORIGIN]|add NAME DIST_DIR [ORIGIN]|list|remove NAME}\n' >&2; return 2 ;;
+  esac
+}
+
 run_local() {
   local bind_address=127.0.0.1 certificate_name=localhost port=8443 with_cups=0 force_cert=0 check_only=0
   while (($#)); do
@@ -295,6 +440,7 @@ case "${1:-}" in
   -h|--help) usage ;;
   cert) shift; make_certificate "$@" ;;
   cups) shift; cups_command "$@" ;;
+  static) shift; static_command "$@" ;;
   server) shift; server_command "$@" ;;
   check) shift; (($# == 0)) || { usage >&2; exit 2; }; build_project ;;
   *) run_local "$@" ;;

@@ -5,11 +5,22 @@
 
 #include <stddef.h>
 
+#define SERVER_STATIC_MOUNTS_MAX 16U
+#define SERVER_STATIC_MOUNT_PATH_CAPACITY 128U
+#define SERVER_STATIC_MOUNT_DIRECTORY_CAPACITY 256U
+
+typedef struct StaticMountConfig {
+  char url_prefix[SERVER_STATIC_MOUNT_PATH_CAPACITY];
+  char directory[SERVER_STATIC_MOUNT_DIRECTORY_CAPACITY];
+  int spa_fallback;
+} StaticMountConfig;
+
 typedef struct ServerConfig {
   LogLevel log_level;
 
   int log_console;
   int log_file;
+  int log_retention_days;
 
   int port;
   char host[64];
@@ -25,6 +36,9 @@ typedef struct ServerConfig {
   char mime_types_file[256];
   char default_mime_type[128];
   int max_static_file_size_mb;
+  StaticMountConfig static_mounts[SERVER_STATIC_MOUNTS_MAX];
+  size_t static_mount_count;
+  int signup_enabled;
 
   char cups_server[256];
   int cups_encryption_required;

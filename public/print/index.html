@@ -4,8 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#f4f6f8">
-  <title>Print a document</title>
+  <title>Prepare a print job</title>
   <link rel="stylesheet" href="/print/print.css">
+  <script src="/print/vendor/pdf-lib.min.js" defer></script>
+  <script src="/print/vendor/qrcode-generator.js" defer></script>
   <script src="/print/print.js" defer></script>
 </head>
 <body>
@@ -13,9 +15,9 @@
     <header class="page-header">
       <a class="back-link" href="/">← Home</a>
       <p class="eyebrow">PRINT SERVICE</p>
-      <h1>Print a document</h1>
-      <p class="intro">Choose a file and a few print options. The service will
-        assign an available printer for you.</p>
+      <h1>Prepare a print job</h1>
+      <p class="intro">Group documents together, set options for each one, and let
+        the service assign an available printer.</p>
     </header>
 
     <form id="login-form" class="print-card">
@@ -45,33 +47,51 @@
         <button id="logout" class="secondary" type="button">Sign out</button>
       </div>
 
-      <label class="field-label file-label" for="document">Document</label>
-      <input id="document" name="document" type="file"
-             accept="application/pdf,image/jpeg,image/png" required>
-      <p id="file-info" class="hint">PDF, JPEG, or PNG · up to 64 MiB</p>
+      <label class="field-label file-label" for="documents">Documents</label>
+      <input id="documents" name="documents" type="file" multiple
+             accept="application/pdf,image/jpeg,image/png">
+      <p class="hint">Add PDF, JPEG, or PNG files. Each file is a separate printer job in one grouped submission, with its own settings. Up to 64 MiB per file.</p>
+      <div id="document-list" class="document-list" aria-live="polite"></div>
 
-      <div class="options">
-        <div class="option">
-          <label class="field-label" for="copies">Copies</label>
-          <input id="copies" name="copies" type="number" min="1" max="99" value="1" required>
+      <details class="advanced-settings">
+        <summary>Advanced print settings</summary>
+        <label class="check-field">
+          <input id="qr-enabled" type="checkbox" checked>
+          <span>Add a small identity QR to the first page of the first document</span>
+        </label>
+        <div class="options advanced-options">
+          <div class="option">
+            <label class="field-label" for="qr-position">QR position</label>
+            <select id="qr-position">
+              <option value="top-right">Top right (default)</option>
+              <option value="top-left">Top left</option>
+              <option value="bottom-right">Bottom right</option>
+              <option value="bottom-left">Bottom left</option>
+            </select>
+          </div>
+          <div class="option">
+            <label class="field-label" for="qr-size">QR size</label>
+            <select id="qr-size">
+              <option value="12">Small · 12 mm</option>
+              <option value="16">Medium · 16 mm</option>
+              <option value="20">Large · 20 mm</option>
+            </select>
+          </div>
         </div>
-        <div class="option">
-          <label class="field-label" for="sides">Sides</label>
-          <select id="sides" name="sides">
-            <option value="one-sided">Single-sided</option>
-            <option value="two-sided-long-edge">Double-sided · long edge</option>
-            <option value="two-sided-short-edge">Double-sided · short edge</option>
-          </select>
-        </div>
-      </div>
+        <p class="hint">The QR contains the account ID and phone number. Placement is inset from the page edge; confirm it fits your printer's printable area.</p>
+      </details>
 
-      <label class="field-label" for="pages">Pages</label>
-      <input id="pages" name="pages" type="text" inputmode="numeric"
-             placeholder="All pages" aria-describedby="pages-hint" disabled>
-      <p id="pages-hint" class="hint">PDF only. For example: 1-3,5. Leave blank to print all pages.</p>
-
-      <button id="submit" type="submit">Send to printer</button>
+      <button id="submit" type="submit" disabled>Send print job</button>
       <p id="status" class="status" role="status" aria-live="polite"></p>
+
+      <section class="job-history" aria-labelledby="history-title">
+        <div class="history-heading">
+          <h2 id="history-title">Recent jobs</h2>
+          <button id="refresh-jobs" class="text-button" type="button">Refresh</button>
+        </div>
+        <p id="jobs-empty" class="hint">Your submitted print jobs will appear here.</p>
+        <div id="jobs-list" class="jobs-list"></div>
+      </section>
     </form>
     <footer>Files are sent to an available printer through the configured CUPS service.</footer>
   </main>

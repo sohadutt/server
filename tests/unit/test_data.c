@@ -61,6 +61,42 @@ int main(void) {
   assert(data_credit_charge(store, "+14155550123", 100, "too-large", "print",
                             &balance) == DATA_INSUFFICIENT_CREDITS);
 
+  int64_t print_job_id = 0;
+  assert(data_print_job_record(store, "+14155550123", 42, "Office Printer",
+                               "application/pdf", 2,
+                               "two-sided-long-edge", "1-3,5",
+                               "test-batch-1", "notes.pdf", "request-1",
+                               &print_job_id) == DATA_OK);
+  assert(print_job_id > 0);
+  DataPrintJob *print_jobs = NULL;
+  size_t print_job_count = 0;
+  assert(data_print_job_list(store, "+14155550123", &print_jobs,
+                             &print_job_count) == DATA_OK);
+  assert(print_job_count == 1);
+  assert(print_jobs[0].id == print_job_id);
+  assert(print_jobs[0].cups_job_id == 42);
+  assert(strcmp(print_jobs[0].printer, "Office Printer") == 0);
+  assert(strcmp(print_jobs[0].pages, "1-3,5") == 0);
+  assert(strcmp(print_jobs[0].batch_id, "test-batch-1") == 0);
+  assert(strcmp(print_jobs[0].document_name, "notes.pdf") == 0);
+  assert(strcmp(print_jobs[0].request_id, "request-1") == 0);
+  assert(strcmp(print_jobs[0].status, "submitted") == 0);
+  data_print_job_list_free(print_jobs);
+  DataPrintJob existing_job = {0};
+  assert(data_print_job_find_request(store, "+14155550123", "request-1",
+                                    &existing_job) == DATA_OK);
+  assert(existing_job.id == print_job_id);
+  assert(data_print_job_set_status(store, "+14155550123", print_job_id,
+                                   "processing") == DATA_OK);
+  assert(data_print_job_set_status(store, "+14155550124", print_job_id,
+                                   "completed") == DATA_NOT_FOUND);
+  assert(data_print_job_get(store, "+14155550123", print_job_id,
+                            &existing_job) == DATA_OK);
+  assert(strcmp(existing_job.status, "processing") == 0);
+  assert(data_print_job_list(store, "+14155550124", &print_jobs,
+                             &print_job_count) == DATA_OK);
+  assert(print_job_count == 0 && print_jobs == NULL);
+
   assert(data_user_set_active(store, "+14155550123", 0) == DATA_OK);
   assert(data_token_authenticate(store, duplicate_token, &user) ==
          DATA_UNAUTHORIZED);

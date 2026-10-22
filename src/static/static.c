@@ -134,9 +134,12 @@ static int decode_request_path(const char *target, char *relative_path,
   }
   relative_path[output] = '\0';
 
-  while (*relative_path == '/') {
-    memmove(relative_path, relative_path + 1, strlen(relative_path));
-  }
+  char *first_component = relative_path;
+  while (*first_component == '/')
+    first_component++;
+  if (first_component != relative_path)
+    memmove(relative_path, first_component,
+            strlen(first_component) + 1);
   if (*relative_path == '\0') {
     return 0;
   }
@@ -255,6 +258,8 @@ static int open_file_beneath(const StaticFileServer *server,
 
 static int load_relative_file(const StaticFileServer *server,
                               const char *relative_path, StaticFile *file) {
+  file->fd = -1;
+  file->is_stream = 0;
   file->data = NULL;
   file->length = 0;
   file->memory_charge = 0;
@@ -268,10 +273,19 @@ static int load_relative_file(const StaticFileServer *server,
     return -1;
 
   struct stat status;
-  if (fstat(input, &status) != 0 || !S_ISREG(status.st_mode) ||
-      status.st_size < 0 ||
+  if (fstat(input, &status) != 0) {
+    close(input);
+    return -1;
+  }
+  if (!S_ISREG(status.st_mode)) {
+    close(input);
+    errno = EACCES;
+    return -1;
+  }
+  if (status.st_size < 0 ||
       (unsigned long long)status.st_size > server->max_file_size_bytes) {
     close(input);
+    errno = EFBIG;
     return -1;
   }
 
@@ -320,8 +334,51 @@ static int load_relative_file(const StaticFileServer *server,
   return 0;
 }
 
+static int open_relative_file(const StaticFileServer *server,
+                              const char *relative_path, StaticFile *file) {
+  file->fd = -1;
+  file->is_stream = 0;
+  file->data = NULL;
+  file->length = 0;
+  file->memory_charge = 0;
+  file->content_type = NULL;
+  file->relative_path[0] = '\0';
+
+  char opened_relative[PATH_MAX];
+  int fd = open_file_beneath(server, relative_path, 1, opened_relative,
+                             sizeof(opened_relative));
+  if (fd < 0)
+    return -1;
+
+  struct stat status;
+  if (fstat(fd, &status) != 0) {
+    int saved_errno = errno;
+    close(fd);
+    errno = saved_errno;
+    return -1;
+  }
+  if (!S_ISREG(status.st_mode) || status.st_size < 0 ||
+      (unsigned long long)status.st_size > server->max_file_size_bytes) {
+    int saved_errno = !S_ISREG(status.st_mode) ? EACCES : EFBIG;
+    close(fd);
+    errno = saved_errno;
+    return -1;
+  }
+  if (copy_string(file->relative_path, sizeof(file->relative_path),
+                  opened_relative) != 0) {
+    close(fd);
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+  file->fd = fd;
+  file->is_stream = 1;
+  file->length = (size_t)status.st_size;
+  file->content_type = content_type_for_path(server, opened_relative);
+  return 0;
+}
+
 int static_file_server_init(StaticFileServer *server,
-                            const struct ServerConfig *config) {
+                            const ServerConfig *config) {
   if (server == NULL || config == NULL || config->max_static_file_size_mb < 1 ||
       config->max_static_file_size_mb > 256) {
     return -1;
@@ -380,15 +437,56 @@ int static_file_server_init(StaticFileServer *server,
     return -1;
   }
 
+  if (config->static_mount_count > SERVER_STATIC_MOUNTS_MAX) {
+    log_error("Too many static application mounts");
+    static_file_server_destroy(server);
+    return -1;
+  }
+  for (size_t index = 0; index < config->static_mount_count; index++) {
+    const StaticMountConfig *mount = &config->static_mounts[index];
+    if (mount->url_prefix[0] != '/' || mount->url_prefix[1] == '\0' ||
+        mount->url_prefix[strlen(mount->url_prefix) - 1] == '/' ||
+        !is_safe_relative_path(mount->url_prefix + 1) ||
+        strchr(mount->url_prefix, '?') != NULL ||
+        strchr(mount->url_prefix, '#') != NULL ||
+        !is_safe_relative_path(mount->directory) ||
+        copy_string(server->mounts[index].url_prefix,
+                    sizeof(server->mounts[index].url_prefix),
+                    mount->url_prefix) != 0 ||
+        copy_string(server->mounts[index].directory,
+                    sizeof(server->mounts[index].directory),
+                    mount->directory) != 0) {
+      log_error("Invalid static application mount configuration");
+      static_file_server_destroy(server);
+      return -1;
+    }
+    server->mounts[index].spa_fallback = mount->spa_fallback;
+    if (mount->spa_fallback) {
+      char app_index[PATH_MAX];
+      int written = snprintf(app_index, sizeof(app_index), "%s/%s",
+                             mount->directory, server->index_file);
+      StaticFile check = {0};
+      if (written < 0 || (size_t)written >= sizeof(app_index) ||
+          open_relative_file(server, app_index, &check) != 0) {
+        static_file_release(&check);
+        log_error("SPA mount index cannot be loaded from its directory");
+        static_file_server_destroy(server);
+        return -1;
+      }
+      static_file_release(&check);
+    }
+    server->mount_count++;
+  }
+
   StaticFile check = {0};
-  if (load_relative_file(server, server->index_file, &check) != 0) {
+  if (open_relative_file(server, server->index_file, &check) != 0) {
     log_error("Configured index file cannot be loaded from the document root");
     static_file_server_destroy(server);
     return -1;
   }
   static_file_release(&check);
 
-  if (load_relative_file(server, server->not_found_page, &check) != 0) {
+  if (open_relative_file(server, server->not_found_page, &check) != 0) {
     log_error("Configured 404 page cannot be loaded from the document root");
     static_file_server_destroy(server);
     return -1;
@@ -412,6 +510,8 @@ int static_file_load(const StaticFileServer *server, const char *request_target,
   if (server == NULL || request_target == NULL || file == NULL)
     return -1;
   file->data = NULL;
+  file->fd = -1;
+  file->is_stream = 0;
   file->length = 0;
   file->memory_charge = 0;
   file->content_type = NULL;
@@ -421,6 +521,47 @@ int static_file_load(const StaticFileServer *server, const char *request_target,
   if (decode_request_path(request_target, relative_path,
                           sizeof(relative_path)) != 0) {
     return -1;
+  }
+
+  const StaticMountConfig *matched_mount = NULL;
+  size_t matched_prefix_length = 0;
+  for (size_t index = 0; index < server->mount_count; index++) {
+    const StaticMountConfig *mount = &server->mounts[index];
+    size_t prefix_length = strlen(mount->url_prefix);
+    if (strncmp(relative_path, mount->url_prefix + 1, prefix_length - 1) != 0 ||
+        (relative_path[prefix_length - 1] != '\0' &&
+         relative_path[prefix_length - 1] != '/'))
+      continue;
+    if (prefix_length > matched_prefix_length) {
+      matched_mount = mount;
+      matched_prefix_length = prefix_length;
+    }
+  }
+  if (matched_mount != NULL) {
+    const char *tail = relative_path + matched_prefix_length;
+    while (*tail == '/')
+      tail++;
+    char mounted_path[PATH_MAX];
+    int written = *tail == '\0'
+                      ? snprintf(mounted_path, sizeof(mounted_path), "%s",
+                                 matched_mount->directory)
+                      : snprintf(mounted_path, sizeof(mounted_path), "%s/%s",
+                                 matched_mount->directory, tail);
+    if (written < 0 || (size_t)written >= sizeof(mounted_path)) {
+      errno = ENAMETOOLONG;
+      return -1;
+    }
+    if (load_relative_file(server, mounted_path, file) == 0)
+      return 0;
+    if (!matched_mount->spa_fallback || (errno != ENOENT && errno != ENOTDIR))
+      return -1;
+    written = snprintf(mounted_path, sizeof(mounted_path), "%s/%s",
+                       matched_mount->directory, server->index_file);
+    if (written < 0 || (size_t)written >= sizeof(mounted_path)) {
+      errno = ENAMETOOLONG;
+      return -1;
+    }
+    return load_relative_file(server, mounted_path, file);
   }
   const char *path_to_load =
       relative_path[0] == '\0' ? server->index_file : relative_path;
@@ -432,6 +573,8 @@ int static_file_load_not_found(const StaticFileServer *server,
   if (server == NULL || file == NULL)
     return -1;
   file->data = NULL;
+  file->fd = -1;
+  file->is_stream = 0;
   file->length = 0;
   file->memory_charge = 0;
   file->content_type = NULL;
@@ -439,12 +582,85 @@ int static_file_load_not_found(const StaticFileServer *server,
   return load_relative_file(server, server->not_found_page, file);
 }
 
+static int open_request_file(const StaticFileServer *server,
+                             const char *request_target, StaticFile *file) {
+  char relative_path[PATH_MAX];
+  if (decode_request_path(request_target, relative_path,
+                          sizeof(relative_path)) != 0)
+    return -1;
+
+  const StaticMountConfig *matched_mount = NULL;
+  size_t matched_prefix_length = 0;
+  for (size_t index = 0; index < server->mount_count; index++) {
+    const StaticMountConfig *mount = &server->mounts[index];
+    size_t prefix_length = strlen(mount->url_prefix);
+    if (strncmp(relative_path, mount->url_prefix + 1, prefix_length - 1) != 0 ||
+        (relative_path[prefix_length - 1] != '\0' &&
+         relative_path[prefix_length - 1] != '/'))
+      continue;
+    if (prefix_length > matched_prefix_length) {
+      matched_mount = mount;
+      matched_prefix_length = prefix_length;
+    }
+  }
+
+  if (matched_mount == NULL) {
+    const char *path = relative_path[0] == '\0' ? server->index_file
+                                                 : relative_path;
+    return open_relative_file(server, path, file);
+  }
+
+  const char *tail = relative_path + matched_prefix_length;
+  while (*tail == '/')
+    tail++;
+  char mounted_path[PATH_MAX];
+  int written = *tail == '\0'
+                    ? snprintf(mounted_path, sizeof(mounted_path), "%s",
+                               matched_mount->directory)
+                    : snprintf(mounted_path, sizeof(mounted_path), "%s/%s",
+                               matched_mount->directory, tail);
+  if (written < 0 || (size_t)written >= sizeof(mounted_path)) {
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+  if (open_relative_file(server, mounted_path, file) == 0)
+    return 0;
+  if (!matched_mount->spa_fallback || (errno != ENOENT && errno != ENOTDIR))
+    return -1;
+
+  written = snprintf(mounted_path, sizeof(mounted_path), "%s/%s",
+                     matched_mount->directory, server->index_file);
+  if (written < 0 || (size_t)written >= sizeof(mounted_path)) {
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+  return open_relative_file(server, mounted_path, file);
+}
+
+int static_file_open(const StaticFileServer *server, const char *request_target,
+                     StaticFile *file) {
+  if (server == NULL || request_target == NULL || file == NULL)
+    return -1;
+  return open_request_file(server, request_target, file);
+}
+
+int static_file_open_not_found(const StaticFileServer *server,
+                               StaticFile *file) {
+  if (server == NULL || file == NULL)
+    return -1;
+  return open_relative_file(server, server->not_found_page, file);
+}
+
 void static_file_release(StaticFile *file) {
   if (file == NULL)
     return;
+  if (file->is_stream && file->fd >= 0)
+    close(file->fd);
   free(file->data);
   release_file_memory(file->memory_charge);
   file->data = NULL;
+  file->fd = -1;
+  file->is_stream = 0;
   file->length = 0;
   file->memory_charge = 0;
   file->content_type = NULL;

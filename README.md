@@ -28,10 +28,19 @@ LAN access and CUPS options.
 - [Native TLS configuration and security behavior](docs/tls.md)
 - [Site security model, protections, and limits](docs/security.md)
 - [Server configuration and static file behavior](docs/configuration-and-static-files.md)
+- [Deploy Vite builds and mounted static apps](docs/static-deployment.md)
 - [Printer discovery and CUPS setup](docs/printing-and-cups.md)
 - [Accounts, credits, administration, and print API](docs/accounts-and-print-api.md)
 - [Load and memory benchmarking](docs/benchmarking.md)
 - [Code layout and request flow](docs/architecture.md)
+
+## Manuals
+
+- [Manuals home](docs/manuals/README.md)
+- [Getting started](docs/manuals/getting-started.md)
+- [User printing guide](docs/manuals/printing.md)
+- [Administrator guide](docs/manuals/administration.md)
+- [Operations and maintenance](docs/manuals/operations.md)
 
 Configuration is in `config/server.conf`; static site files are under
 `public/`; scripts are under `scripts/`; public C interfaces are under

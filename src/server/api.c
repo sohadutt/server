@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <limits.h>
 #include <openssl/crypto.h>
 #include <stdio.h>
 #include <string.h>
@@ -14,6 +15,7 @@
 typedef struct {
   char phone[DATA_PHONE_CAPACITY];
   char password[129];
+  char token[256];
   char authorization[320];
   char reference[DATA_REFERENCE_CAPACITY];
   int64_t credits;
@@ -181,7 +183,7 @@ static int json_string(const char **cursor, char *output, size_t capacity) {
 static int parse_credentials(const char *body, ApiInput *input,
                              int password_required) {
   const char *cursor = body;
-  int phone_seen = 0, password_seen = 0, reference_seen = 0;
+  int phone_seen = 0, password_seen = 0, token_seen = 0, reference_seen = 0;
   skip_space(&cursor);
   if (*cursor++ != '{')
     return -1;
@@ -243,6 +245,13 @@ static int parse_credentials(const char *body, ApiInput *input,
       }
       strcpy(input->password, value);
       password_seen = 1;
+    } else if (strcmp(key, "token") == 0) {
+      if (token_seen || strlen(value) >= sizeof(input->token)) {
+        OPENSSL_cleanse(value, sizeof(value));
+        return -1;
+      }
+      strcpy(input->token, value);
+      token_seen = 1;
     } else if (strcmp(key, "reference") == 0) {
       if (reference_seen) {
         OPENSSL_cleanse(value, sizeof(value));
@@ -296,13 +305,235 @@ static size_t json_response(HttpTransport *transport, int status,
                             strlen(body));
 }
 
+static size_t json_append_string(char *output, size_t capacity, size_t offset,
+                                 const char *value) {
+  if (offset >= capacity || capacity - offset < 2)
+    return SIZE_MAX;
+  output[offset++] = '"';
+  for (const unsigned char *cursor = (const unsigned char *)value;
+       *cursor != '\0'; cursor++) {
+    const char *escape = NULL;
+    switch (*cursor) {
+    case '"': escape = "\\\""; break;
+    case '\\': escape = "\\\\"; break;
+    case '\n': escape = "\\n"; break;
+    case '\r': escape = "\\r"; break;
+    case '\t': escape = "\\t"; break;
+    default: break;
+    }
+    if (escape != NULL) {
+      size_t length = strlen(escape);
+      if (length >= capacity - offset)
+        return SIZE_MAX;
+      memcpy(output + offset, escape, length);
+      offset += length;
+    } else if (*cursor < 32) {
+      if (capacity - offset <= 6)
+        return SIZE_MAX;
+      int written = snprintf(output + offset, capacity - offset, "\\u%04x",
+                             (unsigned int)*cursor);
+      if (written != 6)
+        return SIZE_MAX;
+      offset += 6;
+    } else {
+      if (capacity - offset <= 1)
+        return SIZE_MAX;
+      output[offset++] = (char)*cursor;
+    }
+  }
+  if (offset >= capacity || capacity - offset < 2)
+    return SIZE_MAX;
+  output[offset++] = '"';
+  output[offset] = '\0';
+  return offset;
+}
+
+static size_t handle_job_list(HttpTransport *transport,
+                              const HttpRequest *request,
+                              DataStore *data_store) {
+  ApiInput input = {0};
+  char token[256] = {0};
+  DataUser user = {0};
+  if (parse_input_headers(request, &input) != 0 ||
+      bearer(input.authorization, token) != 0 ||
+      data_token_authenticate(data_store, token, &user) != DATA_OK) {
+    OPENSSL_cleanse(input.authorization, sizeof(input.authorization));
+    OPENSSL_cleanse(token, sizeof(token));
+    OPENSSL_cleanse(&user, sizeof(user));
+    return json_response(transport, 401, "Unauthorized",
+                         "{\"error\":\"Login required\"}");
+  }
+
+  DataPrintJob *jobs = NULL;
+  size_t count = 0;
+  print_api_sync_jobs(data_store, user.phone_e164);
+  DataResult result = data_print_job_list(data_store, user.phone_e164, &jobs,
+                                          &count);
+  OPENSSL_cleanse(input.authorization, sizeof(input.authorization));
+  OPENSSL_cleanse(token, sizeof(token));
+  OPENSSL_cleanse(&user, sizeof(user));
+  if (result != DATA_OK) {
+    data_print_job_list_free(jobs);
+    return json_response(transport, 500, "Internal Server Error",
+                         "{\"error\":\"Could not load print history\"}");
+  }
+
+  const size_t capacity = 200000;
+  char *body = calloc(capacity, 1);
+  if (body == NULL) {
+    data_print_job_list_free(jobs);
+    return json_response(transport, 500, "Internal Server Error",
+                         "{\"error\":\"Could not load print history\"}");
+  }
+  size_t offset = (size_t)snprintf(body, capacity, "{\"jobs\":[");
+  for (size_t i = 0; i < count && offset < capacity; i++) {
+    const DataPrintJob *job = &jobs[i];
+    int written = snprintf(body + offset, capacity - offset,
+                           "%s{\"id\":%lld,\"cups_job_id\":%d,"
+                           "\"batch_id\":\"%s\","
+                           "\"document_name\":\"%s\","
+                           "\"copies\":%d,\"created_at\":%lld,"
+                           "\"printer\":",
+                           i == 0 ? "" : ",", (long long)job->id,
+                           job->cups_job_id, job->batch_id,
+                           job->document_name, job->copies,
+                           (long long)job->created_at);
+    if (written < 0 || (size_t)written >= capacity - offset) {
+      offset = SIZE_MAX;
+      break;
+    }
+    offset += (size_t)written;
+    offset = json_append_string(body, capacity, offset, job->printer);
+    if (offset == SIZE_MAX || offset + 10 >= capacity) {
+      offset = SIZE_MAX;
+      break;
+    }
+    memcpy(body + offset, ",\"format\":", 10);
+    offset += 10;
+    offset = json_append_string(body, capacity, offset, job->format);
+    if (offset == SIZE_MAX || offset + 9 >= capacity) {
+      offset = SIZE_MAX;
+      break;
+    }
+    memcpy(body + offset, ",\"sides\":", 9);
+    offset += 9;
+    offset = json_append_string(body, capacity, offset, job->sides);
+    if (offset == SIZE_MAX || offset + 9 >= capacity) {
+      offset = SIZE_MAX;
+      break;
+    }
+    memcpy(body + offset, ",\"pages\":", 9);
+    offset += 9;
+    offset = json_append_string(body, capacity, offset, job->pages);
+    if (offset == SIZE_MAX || offset + 10 >= capacity) {
+      offset = SIZE_MAX;
+      break;
+    }
+    memcpy(body + offset, ",\"status\":", 10);
+    offset += 10;
+    offset = json_append_string(body, capacity, offset, job->status);
+    if (offset == SIZE_MAX || offset + 1 >= capacity) {
+      offset = SIZE_MAX;
+      break;
+    }
+    body[offset++] = '}';
+    body[offset] = '\0';
+  }
+  data_print_job_list_free(jobs);
+  if (offset == SIZE_MAX || offset > capacity - 4) {
+    free(body);
+    return json_response(transport, 500, "Internal Server Error",
+                         "{\"error\":\"Could not encode print history\"}");
+  }
+  memcpy(body + offset, "]}\n", 4);
+  size_t sent = json_response(transport, 200, "OK", body);
+  free(body);
+  return sent;
+}
+
+static size_t handle_job_cancel(HttpTransport *transport,
+                               const HttpRequest *request, const char *method,
+                               const char *target, DataStore *data_store) {
+  ApiInput input = {0};
+  char token[256] = {0};
+  DataUser user = {0};
+  size_t path_length = strcspn(target, "?");
+  static const char prefix[] = "/api/jobs/";
+  static const char suffix[] = "/cancel";
+  size_t prefix_length = sizeof(prefix) - 1;
+  size_t suffix_length = sizeof(suffix) - 1;
+  int64_t job_id = 0;
+  int path_valid = path_length > prefix_length + suffix_length &&
+                   memcmp(target, prefix, prefix_length) == 0 &&
+                   memcmp(target + path_length - suffix_length, suffix,
+                          suffix_length) == 0;
+  if (path_valid) {
+    size_t first = prefix_length;
+    size_t last = path_length - suffix_length;
+    if (first == last)
+      path_valid = 0;
+    for (size_t i = first; path_valid && i < last; i++) {
+      unsigned char c = (unsigned char)target[i];
+      if (c < '0' || c > '9' ||
+          job_id > (INT64_MAX - (int64_t)(c - '0')) / 10) {
+        path_valid = 0;
+        break;
+      }
+      job_id = job_id * 10 + (int64_t)(c - '0');
+    }
+    if (job_id <= 0)
+      path_valid = 0;
+  }
+  if (strcmp(method, "POST") != 0) {
+    OPENSSL_cleanse(&input, sizeof(input));
+    return json_response(transport, 405, "Method Not Allowed",
+                         "{\"error\":\"Use POST\"}");
+  }
+  if (!http_request_is_bodyless(request)) {
+    OPENSSL_cleanse(&input, sizeof(input));
+    return json_response(transport, 400, "Bad Request",
+                         "{\"error\":\"Cancel requests do not take a body\"}");
+  }
+  if (!path_valid || parse_input_headers(request, &input) != 0 ||
+      bearer(input.authorization, token) != 0 ||
+      data_token_authenticate(data_store, token, &user) != DATA_OK) {
+    OPENSSL_cleanse(input.authorization, sizeof(input.authorization));
+    OPENSSL_cleanse(token, sizeof(token));
+    OPENSSL_cleanse(&user, sizeof(user));
+    return json_response(transport, path_valid ? 401 : 400,
+                         path_valid ? "Unauthorized" : "Bad Request",
+                         path_valid ? "{\"error\":\"Login required\"}"
+                                    : "{\"error\":\"Invalid job ID\"}");
+  }
+  DataResult result = print_api_cancel_job(data_store, user.phone_e164, job_id);
+  OPENSSL_cleanse(input.authorization, sizeof(input.authorization));
+  OPENSSL_cleanse(token, sizeof(token));
+  OPENSSL_cleanse(&user, sizeof(user));
+  if (result == DATA_OK)
+    return json_response(transport, 200, "OK", "{\"ok\":true}");
+  if (result == DATA_NOT_FOUND)
+    return json_response(transport, 404, "Not Found",
+                         "{\"error\":\"Job not found\"}");
+  if (result == DATA_INVALID)
+    return json_response(transport, 409, "Conflict",
+                         "{\"error\":\"Job is no longer cancelable\"}");
+  return json_response(transport, 502, "Bad Gateway",
+                       "{\"error\":\"Printer could not cancel the job\"}");
+}
+
 static int read_json_input(HttpTransport *transport, const HttpRequest *request,
-                           ApiInput *input, int password_required) {
+                           ApiInput *input, int password_required,
+                           size_t *bytes_received) {
   char body[API_BODY_MAX + 1] = {0};
   if (parse_input_headers(request, input) != 0 ||
       read_body(transport, request, input, body) != 0) {
     OPENSSL_cleanse(body, sizeof(body));
     return -1;
+  }
+  if (bytes_received != NULL) {
+    size_t total = input->body_offset + input->content_length;
+    if (total > *bytes_received)
+      *bytes_received = total;
   }
   int status = parse_credentials(body, input, password_required);
   OPENSSL_cleanse(body, sizeof(body));
@@ -311,9 +542,10 @@ static int read_json_input(HttpTransport *transport, const HttpRequest *request,
 
 static size_t handle_credentials(HttpTransport *transport,
                                  const HttpRequest *request,
-                                 DataStore *data_store, int signup) {
+                                 DataStore *data_store, int signup,
+                                 size_t *bytes_received) {
   ApiInput input = {0};
-  if (read_json_input(transport, request, &input, 1) != 0) {
+  if (read_json_input(transport, request, &input, 1, bytes_received) != 0) {
     OPENSSL_cleanse(&input, sizeof(input));
     return json_response(transport, 400, "Bad Request",
                          "{\"error\":\"Invalid phone or password payload\"}");
@@ -344,8 +576,10 @@ static size_t handle_credentials(HttpTransport *transport,
   } else {
     char body[512];
     snprintf(body, sizeof(body),
-             "{\"token\":\"%s\",\"phone\":\"%s\",\"credits\":%lld}",
-             token, user.phone_e164, (long long)user.credits);
+             "{\"token\":\"%s\",\"user_id\":%lld,\"phone\":\"%s\","
+             "\"credits\":%lld}",
+             token, (long long)user.id, user.phone_e164,
+             (long long)user.credits);
     sent = json_response(transport, signup ? 201 : 200,
                          signup ? "Created" : "OK", body);
   }
@@ -359,7 +593,16 @@ int api_handle_request(HttpTransport *transport, const HttpRequest *request,
                        const char *method, const char *target,
                        const ServerConfig *config, DataStore *data_store,
                        size_t *bytes_received, size_t *bytes_sent) {
-  if (target == NULL || strncmp(target, "/api/", 5) != 0)
+  if (target == NULL)
+    return 0;
+  char path[HTTP_TARGET_CAPACITY];
+  size_t path_length = strcspn(target, "?");
+  if (path_length >= sizeof(path))
+    return 0;
+  memcpy(path, target, path_length);
+  path[path_length] = '\0';
+  target = path;
+  if (strncmp(target, "/api/", 5) != 0)
     return 0;
   size_t sent = 0;
   if (bytes_received != NULL)
@@ -379,19 +622,33 @@ int api_handle_request(HttpTransport *transport, const HttpRequest *request,
     else
       sent = json_response(transport, 405, "Method Not Allowed",
                            "{\"error\":\"Use POST to submit a print job\"}");
+  } else if (strncmp(target, "/api/jobs/", 10) == 0) {
+    sent = handle_job_cancel(transport, request, method, target, data_store);
+  } else if (strcmp(target, "/api/jobs") == 0) {
+    if (strcmp(method, "GET") == 0) {
+      sent = handle_job_list(transport, request, data_store);
+    } else {
+      sent = json_response(transport, 405, "Method Not Allowed",
+                           "{\"error\":\"Use GET\"}");
+    }
   } else if (strcmp(target, "/api/login") == 0) {
     if (strcmp(method, "POST") != 0) {
       sent = json_response(transport, 405, "Method Not Allowed",
                            "{\"error\":\"Use POST\"}");
     } else {
-      sent = handle_credentials(transport, request, data_store, 0);
+      sent = handle_credentials(transport, request, data_store, 0,
+                                bytes_received);
     }
   } else if (strcmp(target, "/api/signup") == 0) {
     if (strcmp(method, "POST") != 0)
       sent = json_response(transport, 405, "Method Not Allowed",
                            "{\"error\":\"Use POST\"}");
+    else if (config == NULL || !config->signup_enabled)
+      sent = json_response(transport, 403, "Forbidden",
+                           "{\"error\":\"Account signup is disabled\"}");
     else
-      sent = handle_credentials(transport, request, data_store, 1);
+      sent = handle_credentials(transport, request, data_store, 1,
+                                bytes_received);
   } else if (strcmp(target, "/api/me") == 0) {
     ApiInput input = {0};
     char token[256] = {0};
@@ -406,12 +663,14 @@ int api_handle_request(HttpTransport *transport, const HttpRequest *request,
                            "{\"error\":\"Login required\"}");
     } else {
       char body[256];
-      snprintf(body, sizeof(body), "{\"phone\":\"%s\",\"credits\":%lld}",
-               user.phone_e164, (long long)user.credits);
+      snprintf(body, sizeof(body),
+               "{\"user_id\":%lld,\"phone\":\"%s\",\"credits\":%lld}",
+               (long long)user.id, user.phone_e164, (long long)user.credits);
       sent = json_response(transport, 200, "OK", body);
     }
     OPENSSL_cleanse(input.authorization, sizeof(input.authorization));
     OPENSSL_cleanse(token, sizeof(token));
+    OPENSSL_cleanse(&user, sizeof(user));
   } else if (strcmp(target, "/api/logout") == 0) {
     ApiInput input = {0};
     char token[256] = {0};
@@ -448,7 +707,7 @@ int api_handle_request(HttpTransport *transport, const HttpRequest *request,
       int password_required = strcmp(target, "/api/admin/users") == 0 ||
                               strcmp(target, "/api/admin/users/password") == 0;
       DataResult result = read_json_input(transport, request, &credentials,
-                                          password_required) != 0
+                                          password_required, bytes_received) != 0
                               ? DATA_INVALID
                               : DATA_NOT_FOUND;
       char result_body[512] = "{\"ok\":true}";
@@ -496,6 +755,16 @@ int api_handle_request(HttpTransport *transport, const HttpRequest *request,
         }
         OPENSSL_cleanse(token, sizeof(token));
         OPENSSL_cleanse(&user, sizeof(user));
+      } else if (result != DATA_INVALID &&
+                 strcmp(target, "/api/admin/users/token/revoke") == 0) {
+        if (credentials.token[0] == '\0')
+          result = DATA_INVALID;
+        else
+          result = data_token_revoke(data_store, credentials.phone,
+                                     credentials.token);
+        if (result == DATA_OK)
+          snprintf(result_body, sizeof(result_body),
+                   "{\"ok\":true,\"token_revoked\":true}");
       } else if (result != DATA_INVALID &&
                  strcmp(target, "/api/admin/users/revoke") == 0) {
         result = data_user_get(data_store, credentials.phone, &(DataUser){0});

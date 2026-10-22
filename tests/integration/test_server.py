@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import shutil
 import socket
 import ssl
 import subprocess
@@ -25,6 +26,17 @@ class ServerIntegrationTests(unittest.TestCase):
         cls.root = Path(sys.argv[2]).resolve()
         cls.temporary = tempfile.TemporaryDirectory(prefix="server-integration-")
         cls.temp_path = Path(cls.temporary.name)
+        cls.web_root = cls.temp_path / "public"
+        shutil.copytree(cls.root / "public", cls.web_root)
+        app_root = cls.web_root / "apps" / "portal"
+        (app_root / "assets").mkdir(parents=True)
+        (app_root / "index.html").write_text(
+            '<!doctype html><html><body>vite integration app</body></html>',
+            encoding="utf-8",
+        )
+        (app_root / "assets" / "main.js").write_text(
+            "console.log('vite asset');", encoding="utf-8"
+        )
         cls.admin_token = secrets.token_hex(32)
         with socket.socket() as reservation:
             reservation.bind(("127.0.0.1", 0))
@@ -61,12 +73,14 @@ class ServerIntegrationTests(unittest.TestCase):
                     "log_level = info",
                     "log_console = true",
                     "log_file = false",
-                    f"document_root = {cls.root / 'public'}",
+                    f"document_root = {cls.web_root}",
                     "index_file = index.html",
                     "not_found_page = 404.html",
                     f"mime_types_file = {cls.root / 'config' / 'mime.types'}",
                     "default_mime_type = application/octet-stream",
                     "max_static_file_size_mb = 4",
+                    "signup_enabled = true",
+                    "static_mount = /portal|apps/portal|spa",
                     f"database_path = {cls.database}",
                     f"admin_api_token = {cls.admin_token}",
                 ]
@@ -126,6 +140,7 @@ class ServerIntegrationTests(unittest.TestCase):
         body: dict | None = None,
         token: str | None = None,
         admin: bool = False,
+        forwarded_for: str | None = None,
     ) -> tuple[int, dict[str, str], bytes]:
         headers: dict[str, str] = {}
         data = None
@@ -136,6 +151,8 @@ class ServerIntegrationTests(unittest.TestCase):
             headers["Authorization"] = f"Bearer {token}"
         elif admin:
             headers["Authorization"] = f"Bearer {cls.admin_token}"
+        if forwarded_for is not None:
+            headers["X-Forwarded-For"] = forwarded_for
         request = urllib.request.Request(
             cls.base_url + path, data=data, headers=headers, method=method
         )
@@ -145,7 +162,13 @@ class ServerIntegrationTests(unittest.TestCase):
             ) as response:
                 return response.status, dict(response.headers), response.read()
         except urllib.error.HTTPError as error:
-            return error.code, dict(error.headers), error.read()
+            try:
+                body = error.read()
+            except (ConnectionResetError, ssl.SSLError):
+                # OpenSSL on macOS may report the peer's immediate close as a
+                # reset after urllib has already received the status and headers.
+                body = b""
+            return error.code, dict(error.headers), body
 
     def setUp(self) -> None:
         self.phone = "+1999" + f"{secrets.randbelow(10_000_000):07d}"
@@ -160,6 +183,21 @@ class ServerIntegrationTests(unittest.TestCase):
         status, _, body = self.request("GET", "/missing-test-page")
         self.assertEqual(status, 404)
         self.assertIn(b"Page not found", body)
+
+    def test_vite_static_mount_and_spa_routes(self) -> None:
+        status, headers, body = self.request("GET", "/portal/")
+        self.assertEqual(status, 200)
+        self.assertIn("text/html", headers.get("Content-Type", ""))
+        self.assertIn(b"vite integration app", body)
+
+        status, headers, body = self.request("GET", "/portal/account/jobs")
+        self.assertEqual(status, 200)
+        self.assertIn(b"vite integration app", body)
+
+        status, headers, body = self.request("GET", "/portal/assets/main.js")
+        self.assertEqual(status, 200)
+        self.assertIn("text/javascript", headers.get("Content-Type", ""))
+        self.assertIn(b"vite asset", body)
 
     def test_signup_login_session_and_logout(self) -> None:
         status, _, body = self.request(
@@ -190,6 +228,10 @@ class ServerIntegrationTests(unittest.TestCase):
         status, _, body = self.request("GET", "/api/me", token=token)
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["phone"], self.phone)
+
+        status, _, body = self.request("GET", "/api/jobs", token=token)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"jobs": []})
 
         status, _, body = self.request(
             "POST", "/api/logout", token=token
@@ -263,6 +305,53 @@ class ServerIntegrationTests(unittest.TestCase):
             {"phone": self.phone, "password": "integration-password-2"},
         )
         self.assertEqual(status, 200, body.decode("utf-8", errors="replace"))
+
+    def test_signup_rate_limit(self) -> None:
+        synthetic_client = "198.51.100.77"
+        for _ in range(5):
+            status, _, _ = self.request(
+                "POST",
+                "/api/signup",
+                {
+                    "phone": "+1888" + f"{secrets.randbelow(10_000_000):07d}",
+                    "password": "integration-password-1",
+                },
+                forwarded_for=synthetic_client,
+            )
+            self.assertEqual(status, 201)
+        status, _, body = self.request(
+            "POST",
+            "/api/signup",
+            {"phone": self.phone, "password": "integration-password-1"},
+            forwarded_for=synthetic_client,
+        )
+        self.assertEqual(status, 429, body.decode("utf-8", errors="replace"))
+
+    def test_admin_can_revoke_one_session_token(self) -> None:
+        status, _, body = self.request(
+            "POST",
+            "/api/signup",
+            {"phone": self.phone, "password": "integration-password-1"},
+        )
+        self.assertEqual(status, 201)
+        token = json.loads(body)["token"]
+
+        status, _, body = self.request(
+            "POST",
+            "/api/admin/users/token/revoke",
+            {"phone": self.phone, "token": token},
+            admin=True,
+        )
+        self.assertEqual(status, 200, body.decode("utf-8", errors="replace"))
+        status, _, _ = self.request("GET", "/api/me", token=token)
+        self.assertEqual(status, 401)
+
+    def test_malformed_lf_request_is_rejected(self) -> None:
+        with socket.create_connection(("127.0.0.1", self.port), timeout=3) as raw:
+            with self.ssl_context.wrap_socket(raw, server_hostname="127.0.0.1") as client:
+                client.sendall(b"GET / HTTP/1.1\nHost: localhost\n\n")
+                response = client.recv(1024)
+        self.assertIn(b"400 Bad Request", response)
 
 
 if __name__ == "__main__":

@@ -21,6 +21,13 @@
 #define SERVER_BACKLOG 128
 #define CONNECTION_QUEUE_PER_WORKER 8U
 
+static volatile sig_atomic_t shutdown_requested = 0;
+
+static void request_shutdown(int signal_number) {
+  (void)signal_number;
+  shutdown_requested = 1;
+}
+
 typedef struct {
   int client;
   struct sockaddr_storage peer_address;
@@ -123,6 +130,16 @@ int server_start(const ServerConfig *config) {
     return -1;
   }
 
+  struct sigaction stop_action = {.sa_handler = request_shutdown};
+  sigemptyset(&stop_action.sa_mask);
+  stop_action.sa_flags = 0;
+  if (sigaction(SIGINT, &stop_action, NULL) != 0 ||
+      sigaction(SIGTERM, &stop_action, NULL) != 0) {
+    log_error("Could not install graceful shutdown handlers");
+    return -1;
+  }
+  shutdown_requested = 0;
+
   TlsServer *tls_server = NULL;
   if (config->tls_enabled) {
     tls_server = tls_server_create(config->tls_certificate_file,
@@ -215,16 +232,20 @@ int server_start(const ServerConfig *config) {
   log_info(message);
 
   int loop_result = 0;
-  while (!accept_context.fatal_error &&
-         (loop_result = event_loop_run_once(loop, -1)) >= 0) {
+  while (!accept_context.fatal_error && !shutdown_requested) {
+    loop_result = event_loop_run_once(loop, 1000);
+    if (loop_result < 0) {
+      log_error("Listener event loop stopped unexpectedly");
+      accept_context.fatal_error = 1;
+    }
   }
-
-  log_error("Listener event loop stopped unexpectedly");
+  if (shutdown_requested)
+    log_info("Shutdown requested; draining active connections");
   event_loop_destroy(loop);
   close(listener);
   thread_pool_destroy(workers);
   data_store_close(data_store);
   static_file_server_destroy(&static_files);
   tls_server_destroy(tls_server);
-  return -1;
+  return accept_context.fatal_error ? -1 : 0;
 }

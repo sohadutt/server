@@ -35,6 +35,95 @@ static int is_header_name_character(unsigned char character) {
   return isalnum(character) || strchr("!#$%&'*+-.^_`|~", character) != NULL;
 }
 
+int http_request_headers_valid(const HttpRequest *request,
+                               const char *http_version) {
+  if (request == NULL || http_version == NULL)
+    return 0;
+  size_t limit = 0;
+  for (size_t i = 0; i + 3 < request->length; i++) {
+    if (memcmp(request->data + i, "\r\n\r\n", 4) == 0) {
+      limit = i + 4;
+      break;
+    }
+  }
+  if (limit == 0)
+    return 0;
+
+  size_t position = 0;
+  while (position + 1 < limit &&
+         !(request->data[position] == '\r' &&
+           request->data[position + 1] == '\n')) {
+    unsigned char character = (unsigned char)request->data[position++];
+    if (character < 0x20 || character == 0x7f)
+      return 0;
+  }
+  if (position + 1 >= limit)
+    return 0;
+  position += 2;
+
+  unsigned header_count = 0;
+  unsigned host_count = 0;
+  unsigned length_count = 0;
+  while (position < limit - 2) {
+    size_t line_end = position;
+    while (line_end + 1 < limit &&
+           !(request->data[line_end] == '\r' &&
+             request->data[line_end + 1] == '\n')) {
+      unsigned char character = (unsigned char)request->data[line_end];
+      if (character == '\n' || character == '\r' || character == 0 ||
+          (character < 0x20 && character != '\t') || character == 0x7f)
+        return 0;
+      line_end++;
+    }
+    if (line_end + 1 >= limit || line_end == position ||
+        request->data[position] == ' ' || request->data[position] == '\t' ||
+        ++header_count > 64)
+      return 0;
+
+    size_t colon = position;
+    while (colon < line_end && request->data[colon] != ':') {
+      if (!is_header_name_character((unsigned char)request->data[colon]))
+        return 0;
+      colon++;
+    }
+    if (colon == position || colon == line_end)
+      return 0;
+    size_t value_start = colon + 1;
+    while (value_start < line_end &&
+           (request->data[value_start] == ' ' ||
+            request->data[value_start] == '\t'))
+      value_start++;
+    size_t value_end = line_end;
+    while (value_end > value_start &&
+           (request->data[value_end - 1] == ' ' ||
+            request->data[value_end - 1] == '\t'))
+      value_end--;
+    size_t name_length = colon - position;
+
+    if (name_length == 4 &&
+        strncasecmp(request->data + position, "host", 4) == 0) {
+      if (++host_count > 1 || value_start == value_end)
+        return 0;
+    } else if (name_length == sizeof("content-length") - 1 &&
+               strncasecmp(request->data + position, "content-length",
+                           name_length) == 0) {
+      if (++length_count > 1 || value_start == value_end)
+        return 0;
+      for (size_t i = value_start; i < value_end; i++) {
+        if (request->data[i] < '0' || request->data[i] > '9')
+          return 0;
+      }
+    } else if (name_length == sizeof("transfer-encoding") - 1 &&
+               strncasecmp(request->data + position, "transfer-encoding",
+                           name_length) == 0) {
+      return 0;
+    }
+    position = line_end + 2;
+  }
+
+  return strcmp(http_version, "HTTP/1.1") != 0 || host_count == 1;
+}
+
 static size_t skip_line_ending(const HttpRequest *request, size_t position,
                                size_t limit) {
   if (position < limit && request->data[position] == '\r') {

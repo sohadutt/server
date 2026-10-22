@@ -39,6 +39,7 @@ or add a printer queue. All setup tasks are available through the same script:
 ./scripts/setup.sh cups discover
 ./scripts/setup.sh cups add-printer
 ./scripts/setup.sh cert localhost 365
+./scripts/setup.sh static build dashboard /path/to/dashboard https://print.example.com
 ```
 
 `cups add-printer` interactively discovers an IPP printer and creates a
@@ -53,7 +54,33 @@ install a certificate from a trusted CA for shared or public deployments. The
 account, admin, and print APIs reject plain HTTP requests. Use HTTPS for browser
 login and document uploads.
 
+The print page stamps an identity QR onto the first page of the first document
+in a grouped submission using locally hosted JavaScript libraries. QR creation,
+PDF page selection, and image conversion happen in the browser; the server
+does not need PDF-processing system tools. See the
+[browser printing manual](manuals/printing.md) for supported behavior.
+
 For a public DNS domain, see the [domain deployment guide](domain-setup/README.md).
+To publish a separate Vite app on the same domain, use the
+[static deployment guide](static-deployment.md). It builds the app with the
+right URL base, installs it below `public/`, and prints the link.
+
+## SQLite backups
+
+Create a consistent database snapshot while the service is running:
+
+```sh
+python3 scripts/backup_db.py
+```
+
+By default, this snapshots `data/server.sqlite` into a private `backups/`
+directory. Pass the database path and backup directory as positional arguments
+when using a custom config. The script uses SQLite's online backup API, checks
+the snapshot integrity, writes it atomically with mode `0600`, and does not
+stop or lock out active server requests. Protect backups like the live database
+because they contain phone numbers, password hashes, sessions, and print
+history. Copy backups off-host and schedule retention according to deployment
+policy.
 
 To start the service with a manually maintained config instead, see the
 [build and testing guide](build-and-testing.md) and

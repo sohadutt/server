@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <unistd.h>
 
 #include "transport.h"
 #include "buffer.h"
@@ -28,13 +29,12 @@ static int has_line_break(const char *value) {
   return strchr(value, '\r') != NULL || strchr(value, '\n') != NULL;
 }
 
-size_t http_response_send(HttpTransport *transport, int status_code,
-                          const char *reason_phrase, const char *content_type,
-                          const void *body, size_t body_length) {
+static size_t send_headers(HttpTransport *transport, int status_code,
+                           const char *reason_phrase,
+                           const char *content_type, size_t body_length) {
   if (transport == NULL || transport->socket_fd < 0 || reason_phrase == NULL ||
-      content_type == NULL ||
-      (body == NULL && body_length > 0) || status_code < 100 ||
-      status_code > 599 || has_line_break(reason_phrase) ||
+      content_type == NULL || status_code < 100 || status_code > 599 ||
+      has_line_break(reason_phrase) ||
       has_line_break(content_type)) {
     return 0;
   }
@@ -77,5 +77,49 @@ size_t http_response_send(HttpTransport *transport, int status_code,
     return sent_headers;
   }
   byte_buffer_destroy(&headers);
-  return sent_headers + send_all(transport, body, body_length);
+  return sent_headers;
+}
+
+size_t http_response_send(HttpTransport *transport, int status_code,
+                          const char *reason_phrase, const char *content_type,
+                          const void *body, size_t body_length) {
+  if (body == NULL && body_length > 0)
+    return 0;
+  size_t headers_sent = send_headers(transport, status_code, reason_phrase,
+                                    content_type, body_length);
+  if (headers_sent == 0)
+    return 0;
+  return headers_sent + send_all(transport, body, body_length);
+}
+
+size_t http_response_send_file(HttpTransport *transport, int status_code,
+                               const char *reason_phrase,
+                               const char *content_type, int file_fd,
+                               size_t body_length) {
+  if (file_fd < 0)
+    return 0;
+  size_t headers_sent = send_headers(transport, status_code, reason_phrase,
+                                     content_type, body_length);
+  if (headers_sent == 0)
+    return 0;
+
+  unsigned char buffer[16 * 1024];
+  size_t total = headers_sent;
+  size_t offset = 0;
+  while (offset < body_length) {
+    size_t remaining = body_length - offset;
+    size_t chunk = remaining < sizeof(buffer) ? remaining : sizeof(buffer);
+    ssize_t count;
+    do {
+      count = pread(file_fd, buffer, chunk, (off_t)offset);
+    } while (count < 0 && errno == EINTR);
+    if (count <= 0)
+      break;
+    size_t written = send_all(transport, buffer, (size_t)count);
+    total += written;
+    offset += written;
+    if (written != (size_t)count)
+      break;
+  }
+  return total;
 }

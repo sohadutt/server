@@ -487,7 +487,10 @@ void connection_handle(int client, const struct sockaddr *peer_address,
                           ? http_response_send_file(
                                 &transport, status_code, reason_phrase,
                                 content_type, response_file.fd,
-                                response_file.length)
+                                response_file.length,
+                                response_file.cache_control != NULL
+                                    ? response_file.cache_control
+                                    : "no-cache")
                           : http_response_send(
                                 &transport, status_code, reason_phrase,
                                 content_type, response_file.data,

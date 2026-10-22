@@ -98,10 +98,13 @@ only regular files beneath that root are served. Responses validate header
 values against line breaks and encode printer names before putting them in
 JSON.
 
+API responses use `Cache-Control: no-store`. Static HTML uses
+`Cache-Control: no-cache`, ordinary static files use a one-hour public cache,
+and Vite-style hexadecimal hashed filenames use a one-year immutable cache.
 Responses include `Content-Security-Policy`, `X-Content-Type-Options: nosniff`,
 `X-Frame-Options: DENY`, same-origin resource policy, a restrictive
-`Permissions-Policy`, `Referrer-Policy: no-referrer`, and `Cache-Control:
-no-store`. The CSP allows scripts and styles only from the site's own origin,
+`Permissions-Policy`, and `Referrer-Policy: no-referrer`. The CSP allows
+scripts and styles only from the site's own origin,
 blocks plugins and framing, and disallows inline scripts. HSTS is sent on TLS
 responses only. The browser UI renders server-provided text with `textContent`
 rather than treating it as HTML. These controls reduce the impact of injection;
@@ -119,9 +122,11 @@ secrets out of query strings.
 Print submissions require HTTPS and an active user's bearer token. The endpoint
 accepts only PDF, JPEG, and PNG, checks the file signature against the declared
 media type, caps uploads at 64 MiB, limits the upload duration, and spools to a
-temporary file. Only one print submission runs through the service at a time.
-Copies, duplex mode, and page ranges are parsed against bounded allowlists and
-checked against the selected CUPS queue before job creation. The server chooses
+temporary file. Only one print submission runs through the service at a time;
+the application does not yet persist uploads in a restart-safe queue before
+forwarding them to CUPS. Copies, duplex mode, and page ranges are parsed
+against bounded allowlists and checked against the selected CUPS queue before
+job creation. The server chooses
 the queue; the client cannot name an arbitrary printer.
 
 Signature checks only establish that a file begins with the expected format
@@ -141,6 +146,11 @@ printing after CUPS history is purged. Include the SQLite database in the
 deployment's normal backup schedule.
 
 ## Deployment checklist
+
+The unauthenticated `GET /healthz` endpoint is a liveness probe;
+`GET /readyz` checks that SQLite can answer a query and returns 503 otherwise.
+Readiness does not require CUPS, since accounts and static pages can still
+operate during a printer outage.
 
 - Use a trusted CA certificate for the hostname clients actually use; do not
   rely on a self-signed development certificate for public service.

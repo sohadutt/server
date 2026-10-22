@@ -31,7 +31,9 @@ page ranges. Retries with the same request ID return the existing job when its
 database record is present. If a grouped submission partially succeeds,
 successful files remain in history and only failed files need to be retried.
 `GET /api/jobs` returns up to the most recent 50 records and refreshes their
-status from CUPS. `POST /api/jobs/{id}/cancel` cancels a pending or processing
+status from the CUPS queues referenced by those records, one queue at a time.
+This avoids loading job history from unrelated printers into memory.
+`POST /api/jobs/{id}/cancel` cancels a pending or processing
 job belonging to the signed-in account. Status refresh happens when the user
 opens or refreshes job history. A CUPS job title includes the internal user ID
 and request ID so a retry can restore a missing SQLite row if the process

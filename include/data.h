@@ -55,6 +55,8 @@ typedef struct {
 /* Opens or creates a private SQLite database and initializes its schema. */
 DataStore *data_store_open(const char *path);
 void data_store_close(DataStore *store);
+/* Runs a small database read for readiness probes. */
+int data_store_ready(DataStore *store);
 
 /* Phone numbers are user IDs and must use E.164 format, for example +14155550123. */
 DataResult data_user_create(DataStore *store, const char *phone_e164,

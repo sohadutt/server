@@ -31,11 +31,13 @@ static int has_line_break(const char *value) {
 
 static size_t send_headers(HttpTransport *transport, int status_code,
                            const char *reason_phrase,
-                           const char *content_type, size_t body_length) {
+                           const char *content_type, size_t body_length,
+                           const char *cache_control) {
   if (transport == NULL || transport->socket_fd < 0 || reason_phrase == NULL ||
-      content_type == NULL || status_code < 100 || status_code > 599 ||
+      content_type == NULL || cache_control == NULL || status_code < 100 ||
+      status_code > 599 ||
       has_line_break(reason_phrase) ||
-      has_line_break(content_type)) {
+      has_line_break(content_type) || has_line_break(cache_control)) {
     return 0;
   }
 
@@ -58,11 +60,11 @@ static size_t send_headers(HttpTransport *transport, int status_code,
           "Permissions-Policy: camera=(), microphone=(), geolocation=()\r\n"
           "Cross-Origin-Resource-Policy: same-origin\r\n"
           "Content-Security-Policy: default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; upgrade-insecure-requests\r\n"
-          "Cache-Control: no-store\r\n"
+          "Cache-Control: %s\r\n"
           "%s"
           "Content-Length: %zu\r\n"
           "Connection: close\r\n\r\n",
-          status_code, reason_phrase, content_type,
+          status_code, reason_phrase, content_type, cache_control,
           transport->tls != NULL
               ? "Strict-Transport-Security: max-age=31536000\r\n"
               : "",
@@ -86,7 +88,7 @@ size_t http_response_send(HttpTransport *transport, int status_code,
   if (body == NULL && body_length > 0)
     return 0;
   size_t headers_sent = send_headers(transport, status_code, reason_phrase,
-                                    content_type, body_length);
+                                    content_type, body_length, "no-store");
   if (headers_sent == 0)
     return 0;
   return headers_sent + send_all(transport, body, body_length);
@@ -95,11 +97,13 @@ size_t http_response_send(HttpTransport *transport, int status_code,
 size_t http_response_send_file(HttpTransport *transport, int status_code,
                                const char *reason_phrase,
                                const char *content_type, int file_fd,
-                               size_t body_length) {
+                               size_t body_length,
+                               const char *cache_control) {
   if (file_fd < 0)
     return 0;
   size_t headers_sent = send_headers(transport, status_code, reason_phrase,
-                                     content_type, body_length);
+                                     content_type, body_length,
+                                     cache_control);
   if (headers_sent == 0)
     return 0;
 

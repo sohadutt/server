@@ -172,6 +172,32 @@ static const char *content_type_for_path(const StaticFileServer *server,
                            server->default_mime_type);
 }
 
+static int is_hashed_filename(const char *path) {
+  const char *name = strrchr(path, '/');
+  name = name == NULL ? path : name + 1;
+  const char *extension = strrchr(name, '.');
+  if (extension == NULL || extension == name)
+    return 0;
+  const char *cursor = extension;
+  while (cursor > name &&
+         ((cursor[-1] >= '0' && cursor[-1] <= '9') ||
+          (cursor[-1] >= 'a' && cursor[-1] <= 'f') ||
+          (cursor[-1] >= 'A' && cursor[-1] <= 'F')))
+    cursor--;
+  return cursor > name && cursor[-1] == '-' &&
+         (size_t)(extension - cursor) >= 8;
+}
+
+static const char *cache_policy_for_path(const StaticFileServer *server,
+                                         const char *path) {
+  const char *content_type = content_type_for_path(server, path);
+  if (strcmp(content_type, "text/html") == 0)
+    return "no-cache";
+  if (is_hashed_filename(path))
+    return "public, max-age=31536000, immutable";
+  return "public, max-age=3600";
+}
+
 static int open_file_beneath(const StaticFileServer *server,
                              const char *relative_path,
                              int allow_directory_index,
@@ -264,6 +290,7 @@ static int load_relative_file(const StaticFileServer *server,
   file->length = 0;
   file->memory_charge = 0;
   file->content_type = NULL;
+  file->cache_control = NULL;
   file->relative_path[0] = '\0';
 
   char opened_relative[PATH_MAX];
@@ -342,6 +369,7 @@ static int open_relative_file(const StaticFileServer *server,
   file->length = 0;
   file->memory_charge = 0;
   file->content_type = NULL;
+  file->cache_control = NULL;
   file->relative_path[0] = '\0';
 
   char opened_relative[PATH_MAX];
@@ -374,6 +402,7 @@ static int open_relative_file(const StaticFileServer *server,
   file->is_stream = 1;
   file->length = (size_t)status.st_size;
   file->content_type = content_type_for_path(server, opened_relative);
+  file->cache_control = cache_policy_for_path(server, opened_relative);
   return 0;
 }
 
@@ -515,6 +544,7 @@ int static_file_load(const StaticFileServer *server, const char *request_target,
   file->length = 0;
   file->memory_charge = 0;
   file->content_type = NULL;
+  file->cache_control = NULL;
   file->relative_path[0] = '\0';
 
   char relative_path[PATH_MAX];
@@ -578,6 +608,7 @@ int static_file_load_not_found(const StaticFileServer *server,
   file->length = 0;
   file->memory_charge = 0;
   file->content_type = NULL;
+  file->cache_control = NULL;
   file->relative_path[0] = '\0';
   return load_relative_file(server, server->not_found_page, file);
 }
@@ -664,5 +695,6 @@ void static_file_release(StaticFile *file) {
   file->length = 0;
   file->memory_charge = 0;
   file->content_type = NULL;
+  file->cache_control = NULL;
   file->relative_path[0] = '\0';
 }

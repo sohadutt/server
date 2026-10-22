@@ -28,6 +28,7 @@ typedef struct StaticFile {
   size_t length;
   size_t memory_charge;
   const char *content_type;
+  const char *cache_control;
   char relative_path[STATIC_ROOT_CAPACITY];
 } StaticFile;
 

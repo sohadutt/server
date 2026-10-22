@@ -15,6 +15,7 @@ Usage:
   scripts/setup.sh cups ACTION         Manage CUPS and printer queues
   scripts/setup.sh server [options]    Build and run a configured server
   scripts/setup.sh static ACTION       Build and publish Vite/static apps
+  scripts/setup.sh service-unit [config] Generate a systemd user-service unit
 
 Run options:
   --bind ADDRESS  Address to listen on (default: 127.0.0.1)
@@ -246,6 +247,43 @@ CADDY
   caddy run --config "$caddyfile" --adapter caddyfile
 }
 
+service_unit_command() {
+  (($# <= 1)) || { printf 'Usage: setup.sh service-unit [config-file]\n' >&2; return 2; }
+  local config_file="${1:-config/server.conf}" output_dir output_file
+  [[ "$config_file" == /* ]] || config_file="$project_dir/$config_file"
+  [[ -f "$config_file" ]] || { printf 'Config file not found: %s\n' "$config_file" >&2; return 1; }
+  build_project || return
+  output_dir="$project_dir/build/deployment"
+  output_file="$output_dir/http-server.service"
+  mkdir -p "$output_dir" "$project_dir/data" "$project_dir/logs"
+  cat > "$output_file" <<UNIT
+[Unit]
+Description=Configurable C HTTP and print server
+Wants=network-online.target
+After=network-online.target cups.service
+
+[Service]
+Type=simple
+WorkingDirectory=$project_dir
+ExecStart=$project_dir/build/http_server $config_file
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=$project_dir/data $project_dir/logs
+
+[Install]
+WantedBy=default.target
+UNIT
+  chmod 600 "$output_file"
+  printf 'Generated user service unit: %s\n' "$output_file"
+  printf 'Review paths and writable directories, then install it with:\n'
+  printf '  mkdir -p ~/.config/systemd/user\n'
+  printf '  install -m 600 %q ~/.config/systemd/user/http-server.service\n' "$output_file"
+  printf '  systemctl --user daemon-reload && systemctl --user enable --now http-server.service\n'
+}
+
 static_app_name_valid() {
   [[ "$1" =~ ^[a-z][a-z0-9-]{0,47}$ ]]
 }
@@ -442,6 +480,7 @@ case "${1:-}" in
   cups) shift; cups_command "$@" ;;
   static) shift; static_command "$@" ;;
   server) shift; server_command "$@" ;;
+  service-unit) shift; service_unit_command "$@" ;;
   check) shift; (($# == 0)) || { usage >&2; exit 2; }; build_project ;;
   *) run_local "$@" ;;
 esac

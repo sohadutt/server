@@ -40,7 +40,8 @@ ctest --test-dir build --output-on-failure
 The suite includes focused unit tests for request parsing and validation,
 bounded buffers, HTTP responses, route matching, MIME mappings, configuration,
 the listener event loop, bounded thread-pool behavior, static-file loading and
-path safety, and SQLite accounts, tokens, and credits. The black-box
+path safety, bounded static streaming and cache policy, and SQLite accounts,
+tokens, and credits. The black-box
 integration test starts the built server on a temporary localhost port and
 uses an isolated SQLite database under `build/`.
 
@@ -88,6 +89,15 @@ Pass a config file to use another configuration:
 ```sh
 ./scripts/setup.sh server path/to/server.conf
 ```
+
+On Linux, create a systemd user-service unit with:
+
+```sh
+./scripts/setup.sh service-unit path/to/server.conf
+```
+
+Review the generated writable paths before enabling the unit; see the
+[operations guide](manuals/operations.md).
 
 The script does not install system packages. Install the build requirements
 first. Press Ctrl-C to stop the server.

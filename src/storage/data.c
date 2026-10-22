@@ -396,6 +396,19 @@ void data_store_close(DataStore *store) {
   free(store);
 }
 
+int data_store_ready(DataStore *store) {
+  if (store == NULL)
+    return 0;
+  pthread_mutex_lock(&store->mutex);
+  sqlite3_stmt *statement = NULL;
+  int ready = sqlite3_prepare_v2(store->database, "SELECT 1;", -1,
+                                 &statement, NULL) == SQLITE_OK &&
+              sqlite3_step(statement) == SQLITE_ROW;
+  sqlite3_finalize(statement);
+  pthread_mutex_unlock(&store->mutex);
+  return ready;
+}
+
 DataResult data_user_create(DataStore *store, const char *phone_e164,
                             DataUser *user, char *token,
                             size_t token_capacity) {

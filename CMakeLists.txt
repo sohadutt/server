@@ -11,6 +11,16 @@ find_package(Threads REQUIRED)
 find_package(SQLite3 REQUIRED)
 find_package(OpenSSL 3.0 REQUIRED COMPONENTS SSL Crypto)
 
+# FindSQLite3 used SQLite::SQLite3 in older CMake releases and
+# SQLite3::SQLite3 in newer ones. Normalize on the current target name.
+if(NOT TARGET SQLite3::SQLite3)
+    if(TARGET SQLite::SQLite3)
+        add_library(SQLite3::SQLite3 ALIAS SQLite::SQLite3)
+    else()
+        message(FATAL_ERROR "FindSQLite3 did not provide an imported SQLite target")
+    endif()
+endif()
+
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(SERVER_SOURCES

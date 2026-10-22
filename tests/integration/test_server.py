@@ -37,6 +37,9 @@ class ServerIntegrationTests(unittest.TestCase):
         (app_root / "assets" / "main.js").write_text(
             "console.log('vite asset');", encoding="utf-8"
         )
+        (app_root / "assets" / "main-a1b2c3d4.js").write_text(
+            "console.log('hashed asset');", encoding="utf-8"
+        )
         cls.admin_token = secrets.token_hex(32)
         with socket.socket() as reservation:
             reservation.bind(("127.0.0.1", 0))
@@ -177,12 +180,21 @@ class ServerIntegrationTests(unittest.TestCase):
         status, headers, body = self.request("GET", "/")
         self.assertEqual(status, 200)
         self.assertIn("text/html", headers.get("Content-Type", ""))
+        self.assertEqual(headers.get("Cache-Control"), "no-cache")
         self.assertIn(b"HTTP Server", body)
         self.assertEqual(headers.get("X-Content-Type-Options"), "nosniff")
 
         status, _, body = self.request("GET", "/missing-test-page")
         self.assertEqual(status, 404)
         self.assertIn(b"Page not found", body)
+
+    def test_health_and_readiness_probes(self) -> None:
+        status, _, body = self.request("GET", "/healthz")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"status": "ok"})
+        status, _, body = self.request("GET", "/readyz")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"status": "ready"})
 
     def test_vite_static_mount_and_spa_routes(self) -> None:
         status, headers, body = self.request("GET", "/portal/")
@@ -198,6 +210,16 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("text/javascript", headers.get("Content-Type", ""))
         self.assertIn(b"vite asset", body)
+        self.assertEqual(headers.get("Cache-Control"), "public, max-age=3600")
+
+        status, headers, body = self.request(
+            "GET", "/portal/assets/main-a1b2c3d4.js"
+        )
+        self.assertEqual(status, 200)
+        self.assertIn(b"hashed asset", body)
+        self.assertEqual(
+            headers.get("Cache-Control"), "public, max-age=31536000, immutable"
+        )
 
     def test_signup_login_session_and_logout(self) -> None:
         status, _, body = self.request(

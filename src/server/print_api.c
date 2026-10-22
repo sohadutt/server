@@ -432,12 +432,21 @@ static int recover_cups_job(const DataUser *user,
   if (written < 0 || (size_t)written >= sizeof(prefix))
     return -1;
 
-  cups_job_t *jobs = NULL;
-  int count = cupsGetJobs2(CUPS_HTTP_DEFAULT, &jobs, NULL, 0,
-                           CUPS_WHICHJOBS_ALL);
   int result = -1;
-  if (count > 0 && jobs != NULL) {
-    for (int index = 0; index < count; index++) {
+  cups_dest_t *destinations = NULL;
+  int destination_count = cupsGetDests2(CUPS_HTTP_DEFAULT, &destinations);
+  for (int destination_index = 0;
+       destination_count > 0 && destinations != NULL &&
+       destination_index < destination_count && result != 0;
+       destination_index++) {
+    const char *destination_name = destinations[destination_index].name;
+    if (destination_name == NULL)
+      continue;
+    cups_job_t *jobs = NULL;
+    int job_count = cupsGetJobs2(CUPS_HTTP_DEFAULT, &jobs, destination_name,
+                                 0, CUPS_WHICHJOBS_ALL);
+    for (int index = 0; job_count > 0 && jobs != NULL && index < job_count;
+         index++) {
       cups_job_t *job = &jobs[index];
       if (job->title == NULL || job->dest == NULL ||
           strncmp(job->title, prefix, (size_t)written) != 0 ||
@@ -467,9 +476,11 @@ static int recover_cups_job(const DataUser *user,
       }
       break;
     }
+    if (jobs != NULL && job_count > 0)
+      cupsFreeJobs(job_count, jobs);
   }
-  if (jobs != NULL && count > 0)
-    cupsFreeJobs(count, jobs);
+  if (destinations != NULL && destination_count > 0)
+    cupsFreeDests(destination_count, destinations);
   return result;
 }
 
@@ -644,6 +655,13 @@ static const char *cups_job_status(ipp_jstate_t state) {
   }
 }
 
+static int stored_job_is_terminal(const DataPrintJob *job) {
+  return job != NULL &&
+         (strcmp(job->status, "completed") == 0 ||
+          strcmp(job->status, "canceled") == 0 ||
+          strcmp(job->status, "failed") == 0);
+}
+
 void print_api_sync_jobs(DataStore *data_store, const char *phone_e164) {
   if (data_store == NULL || phone_e164 == NULL)
     return;
@@ -652,25 +670,47 @@ void print_api_sync_jobs(DataStore *data_store, const char *phone_e164) {
   if (data_print_job_list(data_store, phone_e164, &stored_jobs,
                           &stored_count) != DATA_OK)
     return;
-  cups_job_t *cups_jobs = NULL;
-  int cups_count = cupsGetJobs2(CUPS_HTTP_DEFAULT, &cups_jobs, NULL, 0,
-                                CUPS_WHICHJOBS_ALL);
-  if (cups_count > 0 && cups_jobs != NULL) {
-    for (size_t i = 0; i < stored_count; i++) {
-      for (int j = 0; j < cups_count; j++) {
-        if (cups_jobs[j].id == stored_jobs[i].cups_job_id &&
-            cups_jobs[j].dest != NULL &&
-            strcmp(cups_jobs[j].dest, stored_jobs[i].printer) == 0) {
-          (void)data_print_job_set_status(
-              data_store, phone_e164, stored_jobs[i].id,
-              cups_job_status(cups_jobs[j].state));
-          break;
+  for (size_t i = 0; i < stored_count; i++) {
+    if (stored_job_is_terminal(&stored_jobs[i]))
+      continue;
+    int printer_seen = 0;
+    for (size_t previous = 0; previous < i; previous++) {
+      if (strcmp(stored_jobs[previous].printer, stored_jobs[i].printer) == 0) {
+        printer_seen = 1;
+        break;
+      }
+    }
+    if (printer_seen)
+      continue;
+
+    /* Keep CUPS result memory limited to one printer at a time. */
+    cups_job_t *cups_jobs = NULL;
+    int cups_count = cupsGetJobs2(CUPS_HTTP_DEFAULT, &cups_jobs,
+                                  stored_jobs[i].printer, 0,
+                                  CUPS_WHICHJOBS_ALL);
+    if (cups_count > 0 && cups_jobs != NULL) {
+      for (size_t job_index = i; job_index < stored_count; job_index++) {
+        if (stored_job_is_terminal(&stored_jobs[job_index]))
+          continue;
+        if (strcmp(stored_jobs[job_index].printer,
+                   stored_jobs[i].printer) != 0)
+          continue;
+        for (int cups_index = 0; cups_index < cups_count; cups_index++) {
+          if (cups_jobs[cups_index].id == stored_jobs[job_index].cups_job_id &&
+              cups_jobs[cups_index].dest != NULL &&
+              strcmp(cups_jobs[cups_index].dest,
+                     stored_jobs[job_index].printer) == 0) {
+            (void)data_print_job_set_status(
+                data_store, phone_e164, stored_jobs[job_index].id,
+                cups_job_status(cups_jobs[cups_index].state));
+            break;
+          }
         }
       }
     }
+    if (cups_jobs != NULL && cups_count > 0)
+      cupsFreeJobs(cups_count, cups_jobs);
   }
-  if (cups_jobs != NULL && cups_count > 0)
-    cupsFreeJobs(cups_count, cups_jobs);
   data_print_job_list_free(stored_jobs);
 }
 

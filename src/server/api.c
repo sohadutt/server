@@ -602,9 +602,30 @@ int api_handle_request(HttpTransport *transport, const HttpRequest *request,
   memcpy(path, target, path_length);
   path[path_length] = '\0';
   target = path;
+  size_t sent = 0;
+  if (strcmp(target, "/healthz") == 0 || strcmp(target, "/readyz") == 0) {
+    if (bytes_received != NULL)
+      *bytes_received = request != NULL ? request->length : 0;
+    if (strcmp(method, "GET") != 0 || request == NULL ||
+        !http_request_is_bodyless(request)) {
+      sent = json_response(transport, 405, "Method Not Allowed",
+                           "{\"error\":\"Use a bodyless GET request\"}");
+    } else if (strcmp(target, "/readyz") == 0 &&
+               !data_store_ready(data_store)) {
+      sent = json_response(transport, 503, "Service Unavailable",
+                           "{\"status\":\"not_ready\"}");
+    } else {
+      sent = json_response(transport, 200, "OK",
+                           strcmp(target, "/readyz") == 0
+                               ? "{\"status\":\"ready\"}"
+                               : "{\"status\":\"ok\"}");
+    }
+    if (bytes_sent != NULL)
+      *bytes_sent = sent;
+    return 1;
+  }
   if (strncmp(target, "/api/", 5) != 0)
     return 0;
-  size_t sent = 0;
   if (bytes_received != NULL)
     *bytes_received = request != NULL ? request->length : 0;
   if (transport == NULL || transport->tls == NULL) {

@@ -64,11 +64,12 @@ lines and `#` comments allowed. For example, `js text/javascript` makes `.js`
 files use `Content-Type: text/javascript`. Extensions are matched without
 case sensitivity. Unmapped extensions use `default_mime_type`.
 
-The configured maximum size applies to each response file. A shared 256 MiB
-buffer budget bounds memory used by concurrent file responses; workers wait
-for budget to be released before loading another file. Files are opened
+The configured maximum size applies to each response file. Files are opened
 relative to the held document-root directory descriptor, with symlinks
-rejected at each path component.
+rejected at each path component, then streamed through a fixed-size buffer.
+Memory use therefore stays bounded as file size and concurrent downloads grow.
+Static HTML is revalidated on each request; other static files cache for one
+hour. Filenames containing a Vite-style content hash cache for one year.
 
 ## Mounted static applications
 

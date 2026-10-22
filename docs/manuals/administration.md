@@ -1,5 +1,15 @@
 # Administrator guide
 
+## Manually verify accounts
+
+Phone ownership is checked manually outside the service. Keep
+`signup_enabled = false`, verify the number out of band, then create the
+account with the local administrator tool or protected admin route. Set a
+unique password and deliver it over a private channel. For a lost password,
+verify the user manually and reset it through the administrator tool. The
+application does not send verification codes or confirm phone ownership
+itself.
+
 ## Start CUPS and configure printer queues
 
 From the repository root:

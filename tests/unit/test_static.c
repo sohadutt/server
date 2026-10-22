@@ -94,6 +94,17 @@ int main(void) {
   assert(file.length == 11 && memcmp(file.data, "vite-assets", 11) == 0);
   assert(strcmp(file.content_type, "text/javascript") == 0);
   static_file_release(&file);
+  assert(static_file_open(&server, "/app/assets/main.js", &file) == 0);
+  char streamed[12] = {0};
+  assert(file.is_stream && file.fd >= 0 && file.length == 11);
+  assert(pread(file.fd, streamed, 11, 0) == 11);
+  assert(memcmp(streamed, "vite-assets", 11) == 0);
+  assert(strcmp(file.cache_control, "public, max-age=3600") == 0);
+  static_file_release(&file);
+  assert(file.fd == -1 && !file.is_stream);
+  assert(static_file_open(&server, "/", &file) == 0);
+  assert(strcmp(file.cache_control, "no-cache") == 0);
+  static_file_release(&file);
   assert(static_file_load(&server, "/app/account/settings", &file) == 0);
   assert(file.length == 10 && memcmp(file.data, "vite-shell", 10) == 0);
   static_file_release(&file);

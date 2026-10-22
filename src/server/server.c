@@ -188,7 +188,11 @@ int server_start(const ServerConfig *config) {
   HttpRouter router;
   http_router_init(&router);
   uint32_t api_methods = HTTP_ROUTE_ALL_METHODS;
-  if (http_router_add(&router, "/api", HTTP_ROUTE_EXACT, api_methods,
+  if (http_router_add(&router, "/healthz", HTTP_ROUTE_EXACT, HTTP_ROUTE_GET,
+                      HTTP_ROUTE_API) != 0 ||
+      http_router_add(&router, "/readyz", HTTP_ROUTE_EXACT, HTTP_ROUTE_GET,
+                      HTTP_ROUTE_API) != 0 ||
+      http_router_add(&router, "/api", HTTP_ROUTE_EXACT, api_methods,
                       HTTP_ROUTE_API) != 0 ||
       http_router_add(&router, "/api/", HTTP_ROUTE_PREFIX, api_methods,
                       HTTP_ROUTE_API) != 0 ||

@@ -15,6 +15,8 @@
 #include "resource_monitor.h"
 #include "response.h"
 #include "static.h"
+#include "transport.h"
+#include "router.h"
 
 static void log_peer(const struct sockaddr *address, socklen_t address_length) {
   char host[128];
@@ -30,14 +32,24 @@ static void log_peer(const struct sockaddr *address, socklen_t address_length) {
   log_info("Connection from unknown source");
 }
 
+static void close_transport(HttpTransport *transport) {
+  if (transport == NULL)
+    return;
+  tls_connection_destroy(transport->tls);
+  close(transport->socket_fd);
+  transport->socket_fd = -1;
+  transport->tls = NULL;
+}
+
 void connection_handle(int client, const struct sockaddr *peer_address,
                        socklen_t peer_address_length,
                        const ServerConfig *config,
                        const StaticFileServer *static_files,
-                       DataStore *data_store) {
+                       DataStore *data_store, TlsServer *tls_server,
+                       const HttpRouter *router) {
   if (client < 0)
     return;
-  if (config == NULL || static_files == NULL) {
+  if (config == NULL || static_files == NULL || router == NULL) {
     close(client);
     return;
   }
@@ -53,6 +65,16 @@ void connection_handle(int client, const struct sockaddr *peer_address,
     return;
   }
 
+  HttpTransport transport = {.socket_fd = client, .tls = NULL};
+  if (config->tls_enabled) {
+    transport.tls = tls_server_accept(tls_server, client);
+    if (transport.tls == NULL) {
+      log_debug("TLS handshake failed; closing connection");
+      close_transport(&transport);
+      return;
+    }
+  }
+
   log_peer(peer_address, peer_address_length);
 
   ResourceUsageSnapshot request_start;
@@ -60,7 +82,7 @@ void connection_handle(int client, const struct sockaddr *peer_address,
                         resource_monitor_capture(&request_start) == 0;
 
   HttpRequest request = {0};
-  int read_result = http_request_receive(client, &request);
+  int read_result = http_request_receive(&transport, &request);
   if (read_result < 0) {
     log_warn("Failed to read request from client");
   } else {
@@ -70,21 +92,42 @@ void connection_handle(int client, const struct sockaddr *peer_address,
   HttpRequestLine request_line = {0};
   int request_line_valid =
       read_result > 0 && http_request_line_parse(&request, &request_line) == 0;
-  if (request_line_valid && strncmp(request_line.target, "/api/", 5) == 0) {
+  const HttpRoute *route = NULL;
+  HttpRouteResult route_result =
+      request_line_valid
+          ? http_router_resolve(router, request_line.method,
+                                request_line.target, &route)
+          : HTTP_ROUTE_NO_MATCH;
+
+  if (request_line_valid && route_result == HTTP_ROUTE_METHOD_NOT_ALLOWED) {
+    size_t bytes_sent = http_response_send(
+        &transport, 405, "Method Not Allowed", "text/plain; charset=utf-8",
+        "Method Not Allowed\n", sizeof("Method Not Allowed\n") - 1);
+    if (monitor_request)
+      resource_monitor_log_request(&request_start, request.data,
+                                   request.length, bytes_sent);
+    close_transport(&transport);
+    return;
+  }
+
+  if (route_result == HTTP_ROUTE_MATCHED &&
+      route->action == HTTP_ROUTE_API) {
     size_t bytes_sent = 0;
     size_t api_bytes_received = request.length;
-    (void)api_handle_request(client, &request, request_line.method,
+    (void)api_handle_request(&transport, &request, request_line.method,
                              request_line.target, config, data_store,
                              &api_bytes_received, &bytes_sent);
     if (monitor_request) {
       resource_monitor_log_request(&request_start, request.data,
                                    api_bytes_received, bytes_sent);
     }
-    close(client);
+    close_transport(&transport);
     return;
   }
 
-  int parsed_request = request_line_valid && http_request_is_bodyless(&request);
+  int parsed_request = request_line_valid && route != NULL &&
+                       route->action == HTTP_ROUTE_STATIC &&
+                       http_request_is_bodyless(&request);
   StaticFile response_file = {0};
   int status_code = 200;
   const char *reason_phrase = "OK";
@@ -92,9 +135,9 @@ void connection_handle(int client, const struct sockaddr *peer_address,
   if (!parsed_request) {
     status_code = 400;
     reason_phrase = "Bad Request";
-  } else if (strcmp(request_line.method, "GET") != 0) {
-    status_code = 405;
-    reason_phrase = "Method Not Allowed";
+  } else if (route_result == HTTP_ROUTE_NO_MATCH) {
+    status_code = 404;
+    reason_phrase = "Not Found";
   } else if (static_file_load(static_files, request_line.target,
                               &response_file) != 0) {
     status_code = 404;
@@ -118,7 +161,7 @@ void connection_handle(int client, const struct sockaddr *peer_address,
                                  ? response_file.content_type
                                  : static_files->default_mime_type;
   size_t bytes_sent =
-      http_response_send(client, status_code, reason_phrase, content_type,
+      http_response_send(&transport, status_code, reason_phrase, content_type,
                          response_file.data, response_file.length);
 
   if (monitor_request) {
@@ -126,5 +169,5 @@ void connection_handle(int client, const struct sockaddr *peer_address,
                                  bytes_sent);
   }
   static_file_release(&response_file);
-  close(client);
+  close_transport(&transport);
 }

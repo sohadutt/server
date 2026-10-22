@@ -1,17 +1,15 @@
 #include "print_api.h"
 
-#include <openssl/crypto.h>
 #include <cups/cups.h>
 #include <errno.h>
 #include <limits.h>
-#include <poll.h>
+#include <openssl/crypto.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -61,9 +59,7 @@ static int header_name_char(unsigned char c) {
          (c >= '0' && c <= '9') || strchr("!#$%&'*+-.^_`|~", c) != NULL;
 }
 
-static int ascii_digit(unsigned char c) {
-  return c >= '0' && c <= '9';
-}
+static int ascii_digit(unsigned char c) { return c >= '0' && c <= '9'; }
 
 static int append_header_value(HeaderValue *header, const char *value,
                                size_t length) {
@@ -87,15 +83,20 @@ static int parse_headers(const HttpRequest *request,
     return -1;
   headers->body_offset = end;
   HeaderValue values[] = {
-      {.name = "content-type", .value = headers->content_type,
+      {.name = "content-type",
+       .value = headers->content_type,
        .capacity = sizeof(headers->content_type)},
-      {.name = "authorization", .value = headers->authorization,
+      {.name = "authorization",
+       .value = headers->authorization,
        .capacity = sizeof(headers->authorization)},
-      {.name = "x-print-copies", .value = headers->copies,
+      {.name = "x-print-copies",
+       .value = headers->copies,
        .capacity = sizeof(headers->copies)},
-      {.name = "x-print-sides", .value = headers->sides,
+      {.name = "x-print-sides",
+       .value = headers->sides,
        .capacity = sizeof(headers->sides)},
-      {.name = "x-print-pages", .value = headers->pages,
+      {.name = "x-print-pages",
+       .value = headers->pages,
        .capacity = sizeof(headers->pages)},
   };
 
@@ -124,14 +125,12 @@ static int parse_headers(const HttpRequest *request,
     if (colon == position || colon == line_end)
       return -1;
     size_t value_start = colon + 1;
-    while (value_start < line_end &&
-           (request->data[value_start] == ' ' ||
-            request->data[value_start] == '\t'))
+    while (value_start < line_end && (request->data[value_start] == ' ' ||
+                                      request->data[value_start] == '\t'))
       value_start++;
     size_t value_end = line_end;
-    while (value_end > value_start &&
-           (request->data[value_end - 1] == ' ' ||
-            request->data[value_end - 1] == '\t'))
+    while (value_end > value_start && (request->data[value_end - 1] == ' ' ||
+                                       request->data[value_end - 1] == '\t'))
       value_end--;
     size_t name_length = colon - position;
     size_t value_length = value_end - value_start;
@@ -150,9 +149,8 @@ static int parse_headers(const HttpRequest *request,
         parsed = parsed * 10 + (size_t)(digit - '0');
       }
       headers->content_length = parsed;
-    } else if (name_length == 17 &&
-               strncasecmp(request->data + position, "transfer-encoding",
-                           17) == 0) {
+    } else if (name_length == 17 && strncasecmp(request->data + position,
+                                                "transfer-encoding", 17) == 0) {
       return -1;
     } else {
       for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); i++) {
@@ -191,9 +189,10 @@ static int parse_copies(const char *value, int *copies) {
        cursor++) {
     if (!ascii_digit(*cursor))
       return -1;
-    parsed = parsed * 10 + (int)(*cursor - '0');
-    if (parsed > 99)
+    int digit = (int)(*cursor - '0');
+    if (parsed > (99 - digit) / 10)
       return -1;
+    parsed = parsed * 10 + digit;
   }
   if (parsed < 1)
     return -1;
@@ -239,24 +238,23 @@ static int valid_pages(const char *value) {
   return 0;
 }
 
-static int wait_for_upload(int client, const struct timespec *deadline) {
+static int wait_for_upload(HttpTransport *transport,
+                           const struct timespec *deadline) {
   struct timespec now;
   if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
     return -1;
-  long long ms = ((long long)deadline->tv_sec - now.tv_sec) * 1000LL +
-                 ((long long)deadline->tv_nsec - now.tv_nsec + 999999LL) /
-                     1000000LL;
+  long long ms =
+      ((long long)deadline->tv_sec - now.tv_sec) * 1000LL +
+      ((long long)deadline->tv_nsec - now.tv_nsec + 999999LL) / 1000000LL;
   if (ms <= 0)
     return -1;
-  struct pollfd descriptor = {.fd = client, .events = POLLIN};
-  int ready;
-  do {
-    ready = poll(&descriptor, 1, ms > INT_MAX ? INT_MAX : (int)ms);
-  } while (ready < 0 && errno == EINTR);
+  int ready =
+      http_transport_wait_readable(transport, ms > INT_MAX ? INT_MAX : (int)ms);
   return ready > 0 ? 0 : -1;
 }
 
-static int spool_request_body(int client, const HttpRequest *request,
+static int spool_request_body(HttpTransport *transport,
+                              const HttpRequest *request,
                               const PrintRequestHeaders *headers, FILE *file,
                               size_t *body_bytes_received) {
   struct timespec deadline;
@@ -274,16 +272,16 @@ static int spool_request_body(int client, const HttpRequest *request,
     *body_bytes_received = copied;
   unsigned char buffer[16384];
   while (copied < headers->content_length) {
-    if (wait_for_upload(client, &deadline) != 0)
+    if (wait_for_upload(transport, &deadline) != 0)
       return -1;
     size_t remaining = headers->content_length - copied;
     size_t wanted = remaining < sizeof(buffer) ? remaining : sizeof(buffer);
     ssize_t received;
     do {
-      received = recv(client, buffer, wanted, 0);
+      received = http_transport_read(transport, buffer, wanted);
     } while (received < 0 && errno == EINTR);
-    if (received <= 0 || fwrite(buffer, 1, (size_t)received, file) !=
-                             (size_t)received)
+    if (received <= 0 ||
+        fwrite(buffer, 1, (size_t)received, file) != (size_t)received)
       return -1;
     copied += (size_t)received;
     if (body_bytes_received != NULL)
@@ -292,9 +290,37 @@ static int spool_request_body(int client, const HttpRequest *request,
   return fflush(file) == 0 && fseek(file, 0, SEEK_SET) == 0 ? 0 : -1;
 }
 
-static size_t send_json(int client, int status, const char *reason,
-                        const char *json) {
-  return http_response_send(client, status, reason,
+static int upload_signature_matches(FILE *file, const char *media_type) {
+  if (file == NULL || media_type == NULL || fseek(file, 0, SEEK_SET) != 0)
+    return 0;
+
+  unsigned char prefix[1024];
+  size_t count = fread(prefix, 1, sizeof(prefix), file);
+  int valid = 0;
+  if (strcmp(media_type, "application/pdf") == 0) {
+    static const unsigned char marker[] = "%PDF-";
+    for (size_t i = 0; i + sizeof(marker) - 1 <= count; i++) {
+      if (memcmp(prefix + i, marker, sizeof(marker) - 1) == 0) {
+        valid = 1;
+        break;
+      }
+    }
+  } else if (strcmp(media_type, "image/jpeg") == 0) {
+    valid = count >= 3 && prefix[0] == 0xff && prefix[1] == 0xd8 &&
+            prefix[2] == 0xff;
+  } else if (strcmp(media_type, "image/png") == 0) {
+    static const unsigned char signature[] = {0x89, 'P',  'N',  'G',
+                                              0x0d, 0x0a, 0x1a, 0x0a};
+    valid = count >= sizeof(signature) &&
+            memcmp(prefix, signature, sizeof(signature)) == 0;
+  }
+  OPENSSL_cleanse(prefix, sizeof(prefix));
+  return valid && fseek(file, 0, SEEK_SET) == 0;
+}
+
+static size_t send_json(HttpTransport *transport, int status,
+                        const char *reason, const char *json) {
+  return http_response_send(transport, status, reason,
                             "application/json; charset=utf-8", json,
                             strlen(json));
 }
@@ -316,11 +342,10 @@ static int submit_document(FILE *file, const PrintRequestHeaders *headers,
   if (get_printers(&service) != 0 ||
       (selected = select_printer(&service)) == NULL)
     goto cleanup;
-  if (selected->name == NULL ||
-      strlen(selected->name) >= printer_name_capacity)
+  if (selected->name == NULL || strlen(selected->name) >= printer_name_capacity)
     goto cleanup;
-  destination = cupsGetNamedDest(CUPS_HTTP_DEFAULT, selected->name,
-                                 selected->instance);
+  destination =
+      cupsGetNamedDest(CUPS_HTTP_DEFAULT, selected->name, selected->instance);
   if (destination == NULL)
     goto cleanup;
   info = cupsCopyDestInfo(CUPS_HTTP_DEFAULT, destination);
@@ -340,22 +365,27 @@ static int submit_document(FILE *file, const PrintRequestHeaders *headers,
     goto cleanup;
   if (headers->pages_seen) {
     previous_count = option_count;
-    option_count = cupsAddOption("page-ranges", headers->pages, option_count,
-                                 &options);
+    option_count =
+        cupsAddOption("page-ranges", headers->pages, option_count, &options);
     if (option_count != previous_count + 1)
       goto cleanup;
   }
 
-  ipp_status_t status = cupsCreateDestJob(CUPS_HTTP_DEFAULT, destination, info,
-                                          job_id, "Browser Print", option_count,
-                                          options);
-  if (status != IPP_STATUS_OK &&
-      status != IPP_STATUS_OK_IGNORED_OR_SUBSTITUTED)
+  for (int i = 0; i < option_count; i++) {
+    if (!cupsCheckDestSupported(CUPS_HTTP_DEFAULT, destination, info,
+                                options[i].name, options[i].value))
+      goto cleanup;
+  }
+
+  ipp_status_t status =
+      cupsCreateDestJob(CUPS_HTTP_DEFAULT, destination, info, job_id,
+                        "Browser Print", option_count, options);
+  if (status != IPP_STATUS_OK && status != IPP_STATUS_OK_IGNORED_OR_SUBSTITUTED)
     goto cleanup;
   created = 1;
   if (cupsStartDestDocument(CUPS_HTTP_DEFAULT, destination, info, *job_id,
-                            "uploaded-document", media_type, 0, NULL, 1) !=
-      HTTP_STATUS_CONTINUE)
+                            "uploaded-document", media_type, 0, NULL,
+                            1) != HTTP_STATUS_CONTINUE)
     goto cleanup;
 
   unsigned char buffer[65536];
@@ -367,9 +397,8 @@ static int submit_document(FILE *file, const PrintRequestHeaders *headers,
   }
   ipp_status_t finish_status =
       cupsFinishDestDocument(CUPS_HTTP_DEFAULT, destination, info);
-  if (ferror(file) ||
-      (finish_status != IPP_STATUS_OK &&
-       finish_status != IPP_STATUS_OK_IGNORED_OR_SUBSTITUTED))
+  if (ferror(file) || (finish_status != IPP_STATUS_OK &&
+                       finish_status != IPP_STATUS_OK_IGNORED_OR_SUBSTITUTED))
     goto cleanup;
 
   memcpy(printer_name, selected->name, strlen(selected->name) + 1);
@@ -412,10 +441,11 @@ static size_t json_escape(char *output, size_t capacity, const char *input) {
   return used;
 }
 
-size_t print_api_handle(int client, const HttpRequest *request,
+size_t print_api_handle(HttpTransport *transport, const HttpRequest *request,
                         const ServerConfig *config, DataStore *data_store,
                         size_t *bytes_received) {
-  if (client < 0 || request == NULL || config == NULL)
+  if (transport == NULL || transport->socket_fd < 0 || request == NULL ||
+      config == NULL)
     return 0;
   if (bytes_received != NULL)
     *bytes_received = request->length;
@@ -434,6 +464,10 @@ size_t print_api_handle(int client, const HttpRequest *request,
     failure = "Malformed print request headers";
     status = 400;
     reason = "Bad Request";
+  } else if (transport->tls == NULL) {
+    failure = "HTTPS is required to submit print jobs";
+    status = 426;
+    reason = "Upgrade Required";
   } else if (!bearer_token(headers.authorization, token) ||
              data_token_authenticate(data_store, token, &user) != DATA_OK) {
     failure = "Login with a valid phone number and password first";
@@ -457,13 +491,14 @@ size_t print_api_handle(int client, const HttpRequest *request,
 
   if (failure == NULL && pthread_mutex_trylock(&print_submission_mutex) != 0) {
     OPENSSL_cleanse(token, sizeof(token));
-    return send_json(client, 503, "Service Unavailable",
-                     "{\"error\":\"A print request is already being processed\"}");
+    return send_json(
+        transport, 503, "Service Unavailable",
+        "{\"error\":\"A print request is already being processed\"}");
   }
   if (failure != NULL) {
     char body[256];
     snprintf(body, sizeof(body), "{\"error\":\"%s\"}", failure);
-    response_bytes = send_json(client, status, reason, body);
+    response_bytes = send_json(transport, status, reason, body);
     OPENSSL_cleanse(token, sizeof(token));
     return response_bytes;
   }
@@ -488,22 +523,25 @@ size_t print_api_handle(int client, const HttpRequest *request,
     status = 400;
     reason = "Bad Request";
   }
-  if (failure == NULL &&
-      (upload = tmpfile()) == NULL) {
+  if (failure == NULL && (upload = tmpfile()) == NULL) {
     failure = "Could not prepare document upload";
     status = 500;
     reason = "Internal Server Error";
   }
   if (failure == NULL) {
     size_t body_bytes = 0;
-    int spooled = spool_request_body(client, request, &headers, upload,
-                                     &body_bytes);
+    int spooled =
+        spool_request_body(transport, request, &headers, upload, &body_bytes);
     if (bytes_received != NULL)
       *bytes_received = headers.body_offset + body_bytes;
     if (spooled != 0) {
       failure = "Document upload was incomplete or timed out";
       status = 400;
       reason = "Bad Request";
+    } else if (!upload_signature_matches(upload, media_type)) {
+      failure = "The uploaded file does not match its declared format";
+      status = 415;
+      reason = "Unsupported Media Type";
     }
   }
 
@@ -523,18 +561,18 @@ size_t print_api_handle(int client, const HttpRequest *request,
   if (failure != NULL) {
     char body[256];
     snprintf(body, sizeof(body), "{\"error\":\"%s\"}", failure);
-    response_bytes = send_json(client, status, reason, body);
+    response_bytes = send_json(transport, status, reason, body);
   } else {
     char escaped_name[512];
     char body[768];
     if (json_escape(escaped_name, sizeof(escaped_name), printer_name) == 0) {
-      response_bytes = send_json(client, 500, "Internal Server Error",
-                                 "{\"error\":\"Print response encoding failed\"}");
+      response_bytes =
+          send_json(transport, 500, "Internal Server Error",
+                    "{\"error\":\"Print response encoding failed\"}");
     } else {
-      snprintf(body, sizeof(body),
-               "{\"job_id\":%d,\"printer\":\"%s\"}", job_id,
+      snprintf(body, sizeof(body), "{\"job_id\":%d,\"printer\":\"%s\"}", job_id,
                escaped_name);
-      response_bytes = send_json(client, 201, "Created", body);
+      response_bytes = send_json(transport, 201, "Created", body);
       char message[384];
       snprintf(message, sizeof(message), "Submitted print job %d", job_id);
       log_info(message);

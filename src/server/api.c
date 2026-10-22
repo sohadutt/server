@@ -3,7 +3,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/socket.h>
 
 #include "api.h"
 #include "http.h"
@@ -113,15 +112,16 @@ static int parse_input_headers(const HttpRequest *request, ApiInput *input) {
   return 0;
 }
 
-static int read_body(int client, const HttpRequest *request, ApiInput *input,
+static int read_body(HttpTransport *transport, const HttpRequest *request,
+                     ApiInput *input,
                      char body[API_BODY_MAX + 1]) {
   size_t received = request->length - input->body_offset;
   if (received > input->content_length)
     return -1;
   memcpy(body, request->data + input->body_offset, received);
   while (received < input->content_length) {
-    ssize_t count =
-        recv(client, body + received, input->content_length - received, 0);
+    ssize_t count = http_transport_read(
+        transport, body + received, input->content_length - received);
     if (count < 0 && errno == EINTR)
       continue;
     if (count <= 0)
@@ -237,7 +237,7 @@ static int parse_credentials(const char *body, ApiInput *input,
       phone_seen = 1;
     } else if (strcmp(key, "password") == 0 ||
                strcmp(key, "new_password") == 0) {
-      if (password_seen) {
+      if (password_seen || strlen(value) >= sizeof(input->password)) {
         OPENSSL_cleanse(value, sizeof(value));
         return -1;
       }
@@ -288,18 +288,19 @@ static int equal_secret(const char *a, const char *b) {
   return difference == 0;
 }
 
-static size_t json_response(int client, int status, const char *reason,
+static size_t json_response(HttpTransport *transport, int status,
+                            const char *reason,
                             const char *body) {
-  return http_response_send(client, status, reason,
+  return http_response_send(transport, status, reason,
                             "application/json; charset=utf-8", body,
                             strlen(body));
 }
 
-static int read_json_input(int client, const HttpRequest *request,
+static int read_json_input(HttpTransport *transport, const HttpRequest *request,
                            ApiInput *input, int password_required) {
   char body[API_BODY_MAX + 1] = {0};
   if (parse_input_headers(request, input) != 0 ||
-      read_body(client, request, input, body) != 0) {
+      read_body(transport, request, input, body) != 0) {
     OPENSSL_cleanse(body, sizeof(body));
     return -1;
   }
@@ -308,12 +309,13 @@ static int read_json_input(int client, const HttpRequest *request,
   return status;
 }
 
-static size_t handle_credentials(int client, const HttpRequest *request,
-                                DataStore *data_store, int signup) {
+static size_t handle_credentials(HttpTransport *transport,
+                                 const HttpRequest *request,
+                                 DataStore *data_store, int signup) {
   ApiInput input = {0};
-  if (read_json_input(client, request, &input, 1) != 0) {
+  if (read_json_input(transport, request, &input, 1) != 0) {
     OPENSSL_cleanse(&input, sizeof(input));
-    return json_response(client, 400, "Bad Request",
+    return json_response(transport, 400, "Bad Request",
                          "{\"error\":\"Invalid phone or password payload\"}");
   }
 
@@ -328,23 +330,23 @@ static size_t handle_credentials(int client, const HttpRequest *request,
                                             sizeof(token), &user);
   size_t sent;
   if (signup && result == DATA_DUPLICATE) {
-    sent = json_response(client, 409, "Conflict",
+    sent = json_response(transport, 409, "Conflict",
                          "{\"error\":\"An account with this phone number already exists\"}");
   } else if (result == DATA_INVALID) {
-    sent = json_response(client, 400, "Bad Request",
+    sent = json_response(transport, 400, "Bad Request",
                          "{\"error\":\"Use an E.164 phone number and an 8-128 character password\"}");
   } else if (result == DATA_UNAUTHORIZED) {
-    sent = json_response(client, 401, "Unauthorized",
+    sent = json_response(transport, 401, "Unauthorized",
                          "{\"error\":\"Phone number or password is incorrect\"}");
   } else if (result != DATA_OK) {
-    sent = json_response(client, 500, "Internal Server Error",
+    sent = json_response(transport, 500, "Internal Server Error",
                          "{\"error\":\"Could not create account session\"}");
   } else {
     char body[512];
     snprintf(body, sizeof(body),
              "{\"token\":\"%s\",\"phone\":\"%s\",\"credits\":%lld}",
              token, user.phone_e164, (long long)user.credits);
-    sent = json_response(client, signup ? 201 : 200,
+    sent = json_response(transport, signup ? 201 : 200,
                          signup ? "Created" : "OK", body);
   }
   OPENSSL_cleanse(token, sizeof(token));
@@ -353,7 +355,7 @@ static size_t handle_credentials(int client, const HttpRequest *request,
   return sent;
 }
 
-int api_handle_request(int client, const HttpRequest *request,
+int api_handle_request(HttpTransport *transport, const HttpRequest *request,
                        const char *method, const char *target,
                        const ServerConfig *config, DataStore *data_store,
                        size_t *bytes_received, size_t *bytes_sent) {
@@ -362,43 +364,51 @@ int api_handle_request(int client, const HttpRequest *request,
   size_t sent = 0;
   if (bytes_received != NULL)
     *bytes_received = request != NULL ? request->length : 0;
+  if (transport == NULL || transport->tls == NULL) {
+    sent = json_response(transport, 426, "Upgrade Required",
+                         "{\"error\":\"HTTPS is required for account and print APIs\"}");
+    if (bytes_sent != NULL)
+      *bytes_sent = sent;
+    return 1;
+  }
   if (strcmp(target, "/api/print") == 0) {
     if (strcmp(method, "POST") == 0)
       sent =
-          print_api_handle(client, request, config, data_store, bytes_received);
+          print_api_handle(transport, request, config, data_store,
+                           bytes_received);
     else
-      sent = json_response(client, 405, "Method Not Allowed",
+      sent = json_response(transport, 405, "Method Not Allowed",
                            "{\"error\":\"Use POST to submit a print job\"}");
   } else if (strcmp(target, "/api/login") == 0) {
     if (strcmp(method, "POST") != 0) {
-      sent = json_response(client, 405, "Method Not Allowed",
+      sent = json_response(transport, 405, "Method Not Allowed",
                            "{\"error\":\"Use POST\"}");
     } else {
-      sent = handle_credentials(client, request, data_store, 0);
+      sent = handle_credentials(transport, request, data_store, 0);
     }
   } else if (strcmp(target, "/api/signup") == 0) {
     if (strcmp(method, "POST") != 0)
-      sent = json_response(client, 405, "Method Not Allowed",
+      sent = json_response(transport, 405, "Method Not Allowed",
                            "{\"error\":\"Use POST\"}");
     else
-      sent = handle_credentials(client, request, data_store, 1);
+      sent = handle_credentials(transport, request, data_store, 1);
   } else if (strcmp(target, "/api/me") == 0) {
     ApiInput input = {0};
     char token[256] = {0};
     DataUser user = {0};
     if (strcmp(method, "GET") != 0) {
-      sent = json_response(client, 405, "Method Not Allowed",
+      sent = json_response(transport, 405, "Method Not Allowed",
                            "{\"error\":\"Use GET\"}");
     } else if (parse_input_headers(request, &input) != 0 ||
                bearer(input.authorization, token) != 0 ||
                data_token_authenticate(data_store, token, &user) != DATA_OK) {
-      sent = json_response(client, 401, "Unauthorized",
+      sent = json_response(transport, 401, "Unauthorized",
                            "{\"error\":\"Login required\"}");
     } else {
       char body[256];
       snprintf(body, sizeof(body), "{\"phone\":\"%s\",\"credits\":%lld}",
                user.phone_e164, (long long)user.credits);
-      sent = json_response(client, 200, "OK", body);
+      sent = json_response(transport, 200, "OK", body);
     }
     OPENSSL_cleanse(input.authorization, sizeof(input.authorization));
     OPENSSL_cleanse(token, sizeof(token));
@@ -407,16 +417,16 @@ int api_handle_request(int client, const HttpRequest *request,
     char token[256] = {0};
     DataUser user = {0};
     if (strcmp(method, "POST") != 0) {
-      sent = json_response(client, 405, "Method Not Allowed",
+      sent = json_response(transport, 405, "Method Not Allowed",
                            "{\"error\":\"Use POST\"}");
     } else if (parse_input_headers(request, &input) != 0 ||
                bearer(input.authorization, token) != 0 ||
                data_token_authenticate(data_store, token, &user) != DATA_OK) {
-      sent = json_response(client, 401, "Unauthorized",
+      sent = json_response(transport, 401, "Unauthorized",
                            "{\"error\":\"Login required\"}");
     } else {
       (void)data_token_revoke(data_store, user.phone_e164, token);
-      sent = json_response(client, 200, "OK", "{\"ok\":true}");
+      sent = json_response(transport, 200, "OK", "{\"ok\":true}");
     }
     OPENSSL_cleanse(input.authorization, sizeof(input.authorization));
     OPENSSL_cleanse(token, sizeof(token));
@@ -428,16 +438,16 @@ int api_handle_request(int client, const HttpRequest *request,
         strncasecmp(input.authorization, "Bearer ", 7) == 0 &&
         equal_secret(input.authorization + 7, config->admin_api_token);
     if (strcmp(method, "POST") != 0) {
-      sent = json_response(client, 405, "Method Not Allowed",
+      sent = json_response(transport, 405, "Method Not Allowed",
                            "{\"error\":\"Use POST\"}");
     } else if (!valid_admin) {
-      sent = json_response(client, 401, "Unauthorized",
+      sent = json_response(transport, 401, "Unauthorized",
                            "{\"error\":\"Admin authorization required\"}");
     } else {
       ApiInput credentials = {0};
       int password_required = strcmp(target, "/api/admin/users") == 0 ||
                               strcmp(target, "/api/admin/users/password") == 0;
-      DataResult result = read_json_input(client, request, &credentials,
+      DataResult result = read_json_input(transport, request, &credentials,
                                           password_required) != 0
                               ? DATA_INVALID
                               : DATA_NOT_FOUND;
@@ -527,23 +537,25 @@ int api_handle_request(int client, const HttpRequest *request,
       }
 
       if (result == DATA_DUPLICATE) {
-        sent = json_response(client, 409, "Conflict",
+        sent = json_response(transport, 409, "Conflict",
                              "{\"error\":\"Account or reference already exists\"}");
       } else if (result == DATA_INVALID) {
-        sent = json_response(client, 400, "Bad Request",
+        sent = json_response(transport, 400, "Bad Request",
                              "{\"error\":\"Invalid admin request fields\"}");
       } else if (result != DATA_OK) {
-        sent = json_response(client, result == DATA_NOT_FOUND ? 404 : 400,
-                             result == DATA_NOT_FOUND ? "Not Found" : "Bad Request",
+        sent = json_response(
+            transport, result == DATA_NOT_FOUND ? 404 : 400,
+            result == DATA_NOT_FOUND ? "Not Found" : "Bad Request",
                              "{\"error\":\"Admin operation failed for this user\"}");
       } else {
-        sent = json_response(client, result_status, result_reason, result_body);
+        sent = json_response(transport, result_status, result_reason,
+                             result_body);
       }
       OPENSSL_cleanse(&credentials, sizeof(credentials));
     }
     OPENSSL_cleanse(&input, sizeof(input));
   } else {
-    sent = json_response(client, 404, "Not Found",
+    sent = json_response(transport, 404, "Not Found",
                          "{\"error\":\"Unknown API route\"}");
   }
   if (bytes_sent != NULL)

@@ -1,46 +1,32 @@
-#include "mime_types.h"
-#include "logger.h"
+#include "router.h"
 
 #include <assert.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-
-void log_error(const char *message) { (void)message; }
-
-static void write_text_file(const char *path, const char *text) {
-  FILE *file = fopen(path, "w");
-  assert(file != NULL);
-  assert(fputs(text, file) >= 0);
-  assert(fclose(file) == 0);
-}
 
 int main(void) {
-  char path[] = "/tmp/server-mime-test-XXXXXX";
-  int descriptor = mkstemp(path);
-  assert(descriptor >= 0);
-  close(descriptor);
+  HttpRouter router;
+  http_router_init(&router);
+  assert(http_router_add(&router, "/api", HTTP_ROUTE_EXACT,
+                        HTTP_ROUTE_ALL_METHODS, HTTP_ROUTE_API) == 0);
+  assert(http_router_add(&router, "/api/", HTTP_ROUTE_PREFIX,
+                        HTTP_ROUTE_ALL_METHODS, HTTP_ROUTE_API) == 0);
+  assert(http_router_add(&router, "/", HTTP_ROUTE_FALLBACK, HTTP_ROUTE_GET,
+                        HTTP_ROUTE_STATIC) == 0);
+  const HttpRoute *route = NULL;
+  assert(http_router_resolve(&router, "GET", "/api?x=1", &route) ==
+         HTTP_ROUTE_MATCHED);
+  assert(route != NULL && route->action == HTTP_ROUTE_API);
+  assert(http_router_resolve(&router, "POST", "/api/users/", &route) ==
+         HTTP_ROUTE_MATCHED);
+  assert(route != NULL && route->action == HTTP_ROUTE_API);
+  assert(http_router_resolve(&router, "GET", "/apix", &route) ==
+         HTTP_ROUTE_MATCHED);
+  assert(route != NULL && route->action == HTTP_ROUTE_STATIC);
+  assert(http_router_resolve(&router, "POST", "/about.html", &route) ==
+         HTTP_ROUTE_METHOD_NOT_ALLOWED);
+  assert(route != NULL && route->action == HTTP_ROUTE_STATIC);
 
-  MimeTypes types = {0};
-  write_text_file(path, "# test mappings\nhtml text/html\nCSS text/css\n");
-  assert(mime_types_load(&types, path) == 0);
-  assert(types.count == 2);
-  assert(strcmp(mime_types_lookup(&types, "HTML", "fallback"), "text/html") == 0);
-  assert(strcmp(mime_types_lookup(&types, "css", "fallback"), "text/css") == 0);
-  assert(strcmp(mime_types_lookup(&types, "unknown", "fallback"), "fallback") == 0);
-  assert(mime_types_lookup(NULL, "html", "fallback") != NULL);
-
-  write_text_file(path, "invalid-extension! text/plain\n");
-  assert(mime_types_load(&types, path) == -1);
-  assert(types.count == 0);
-  assert(mime_content_type_valid("application/json") == 1);
-  assert(mime_content_type_valid("text/plain; charset=utf-8") == 0);
-  assert(mime_content_type_valid("/plain") == 0);
-  assert(mime_content_type_valid("text/") == 0);
-  assert(mime_content_type_valid(NULL) == 0);
-
-  unlink(path);
-  puts("MIME type unit tests passed");
+  puts("Router unit tests passed");
   return 0;
 }

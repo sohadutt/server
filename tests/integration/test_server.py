@@ -7,6 +7,7 @@ import json
 import os
 import secrets
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -29,7 +30,24 @@ class ServerIntegrationTests(unittest.TestCase):
             reservation.bind(("127.0.0.1", 0))
             cls.port = reservation.getsockname()[1]
         cls.database = cls.root / "build" / f"integration-users-{cls.port}.sqlite"
-        cls.base_url = f"http://127.0.0.1:{cls.port}"
+        cls.base_url = f"https://127.0.0.1:{cls.port}"
+        cls.certificate = cls.temp_path / "server.crt"
+        cls.private_key = cls.temp_path / "server.key"
+        subprocess.run(
+            [
+                "openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt",
+                "ec_paramgen_curve:P-256", "-sha256", "-noenc", "-days", "1",
+                "-subj", "/CN=127.0.0.1", "-addext",
+                "subjectAltName=IP:127.0.0.1", "-keyout", os.fspath(cls.private_key),
+                "-out", os.fspath(cls.certificate),
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        cls.ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        cls.ssl_context.check_hostname = False
+        cls.ssl_context.verify_mode = ssl.CERT_NONE
         config = cls.temp_path / "server.conf"
         config.write_text(
             "\n".join(
@@ -37,6 +55,9 @@ class ServerIntegrationTests(unittest.TestCase):
                     f"port = {cls.port}",
                     "host = 127.0.0.1",
                     "worker_threads = 8",
+                    "tls_enabled = true",
+                    f"tls_certificate_file = {cls.certificate}",
+                    f"tls_private_key_file = {cls.private_key}",
                     "log_level = info",
                     "log_console = true",
                     "log_file = false",
@@ -119,7 +140,9 @@ class ServerIntegrationTests(unittest.TestCase):
             cls.base_url + path, data=data, headers=headers, method=method
         )
         try:
-            with urllib.request.urlopen(request, timeout=3) as response:
+            with urllib.request.urlopen(
+                request, timeout=3, context=cls.ssl_context
+            ) as response:
                 return response.status, dict(response.headers), response.read()
         except urllib.error.HTTPError as error:
             return error.code, dict(error.headers), error.read()

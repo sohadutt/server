@@ -45,7 +45,8 @@ process rather than the proxy. Options include:
 
 | Option | Purpose |
 | --- | --- |
-| `--url` | Server origin URL |
+| `--url` | Server origin URL (defaults to `https://localhost:8443`) |
+| `--ca-cert` | CA/certificate file for HTTPS verification; defaults to `certs/server.crt` |
 | `--path` | Request path; `/` for static load or `/api/me` for authenticated load |
 | `--phone` | Existing active test user for `/api/me` |
 | `--database` | SQLite path; defaults to `database_path` in `server.conf` |

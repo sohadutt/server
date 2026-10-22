@@ -19,7 +19,7 @@ const fileInfo = document.querySelector("#file-info");
 const statusMessage = document.querySelector("#status");
 const submitButton = document.querySelector("#submit");
 
-let sessionToken = sessionStorage.getItem("print-token") || "";
+let sessionToken = "";
 let signupMode = false;
 
 authToggle.addEventListener("click", () => {
@@ -54,7 +54,6 @@ function showPrintForm(user) {
 
 function endSession(message = "") {
   sessionToken = "";
-  sessionStorage.removeItem("print-token");
   form.hidden = true;
   loginForm.hidden = false;
   if (message) {
@@ -109,7 +108,6 @@ loginForm.addEventListener("submit", async (event) => {
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(result.error || "Sign in failed.");
     sessionToken = result.token;
-    sessionStorage.setItem("print-token", sessionToken);
     showPrintForm(result);
   } catch (error) {
     passwordInput.value = "";

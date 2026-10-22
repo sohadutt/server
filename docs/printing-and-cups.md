@@ -22,13 +22,13 @@ a printer in the job manifest.
 Use the helper to start and inspect the local CUPS scheduler:
 
 ```sh
-./scripts/setup_cups.sh
-./scripts/setup_cups.sh --status
-./scripts/setup_cups.sh --discover
-./scripts/setup_cups.sh --add-printer
+./scripts/setup.sh cups start
+./scripts/setup.sh cups status
+./scripts/setup.sh cups discover
+./scripts/setup.sh cups add-printer
 ```
 
-The setup helper supports systemd on Linux and launchd on macOS. It asks for
+The unified setup script supports systemd on Linux and launchd on macOS. It asks for
 administrator privileges when the service manager needs them, but does not
 install packages or enable remote CUPS administration. `--discover` lists IPP
 destinations and `--add-printer` runs the interactive driverless queue setup.

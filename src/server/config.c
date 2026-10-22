@@ -53,6 +53,17 @@ static int parse_bool(const char *value, int *result) {
 }
 
 static int set_value(ServerConfig *config, const char *key, const char *value) {
+  if (strcmp(key, "tls_enabled") == 0) {
+    return parse_bool(value, &config->tls_enabled);
+  }
+  if (strcmp(key, "tls_certificate_file") == 0) {
+    return copy_value(config->tls_certificate_file,
+                      sizeof(config->tls_certificate_file), value);
+  }
+  if (strcmp(key, "tls_private_key_file") == 0) {
+    return copy_value(config->tls_private_key_file,
+                      sizeof(config->tls_private_key_file), value);
+  }
   if (strcmp(key, "port") == 0) {
     return parse_int(value, 1, 65535, &config->port);
   }
@@ -206,6 +217,13 @@ int config_load(const char *filename, ServerConfig *config) {
   }
   fclose(file);
 
+  if (result == 0 && parsed.tls_enabled &&
+      (parsed.tls_certificate_file[0] == '\0' ||
+       parsed.tls_private_key_file[0] == '\0')) {
+    fprintf(stderr, "%s: tls_enabled requires tls_certificate_file and "
+                    "tls_private_key_file\n", filename);
+    result = -1;
+  }
   if (result == 0)
     *config = parsed;
   return result;

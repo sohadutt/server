@@ -304,7 +304,11 @@ async def run_benchmark(
 ) -> int:
     host = parsed.hostname
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    tls_context = ssl.create_default_context() if parsed.scheme == "https" else None
+    if parsed.scheme == "https":
+        ca_file = args.ca_cert if Path(args.ca_cert).is_file() else None
+        tls_context = ssl.create_default_context(cafile=ca_file)
+    else:
+        tls_context = None
     path = args.path
     if not path.startswith("/") or "\r" in path or "\n" in path:
         raise ValueError("--path must start with / and contain no line breaks")
@@ -382,7 +386,12 @@ def main() -> int:
         description="Ramp concurrent load until the server shows errors or throughput saturation."
     )
     parser.add_argument(
-        "--url", default="http://127.0.0.1:8080", help="server origin URL"
+        "--url", default="https://localhost:8443", help="server origin URL"
+    )
+    parser.add_argument(
+        "--ca-cert",
+        default=(ROOT / "certs" / "server.crt").as_posix(),
+        help="CA/certificate file used to verify HTTPS",
     )
     parser.add_argument(
         "--path",

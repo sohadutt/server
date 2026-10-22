@@ -49,15 +49,20 @@ protected by `admin_api_token`; that setting is not used by this script.
 
 ## Browser login and HTTP admin routes
 
-For remote administration through HTTP, set `admin_api_token` in
+For administration through the web API, set `admin_api_token` in
 `config/server.conf` to a private random value of at least 32 characters.
 Generate one with `openssl rand -hex 32`; keep it private and do not commit it.
-Admin requests use `Authorization: Bearer <admin-secret>`.
+Admin requests use `Authorization: Bearer <admin-secret>`. All account, admin,
+and print API routes require HTTPS; HTTP requests receive `426 Upgrade
+Required`. Responses use a restrictive Content Security Policy, disable MIME
+sniffing and framing, and disable caching. The browser keeps the user session
+token in memory only, so reloading the page requires signing in again.
 
 Create an account:
 
 ```sh
-curl --fail-with-body -X POST http://localhost:8080/api/admin/users \
+curl --fail-with-body --cacert certs/server.crt \
+  -X POST https://localhost:8443/api/admin/users \
   -H 'Authorization: Bearer YOUR_ADMIN_SECRET' \
   -H 'Content-Type: application/json' \
   -d '{"phone":"+14155550123","password":"use-a-unique-password"}'
@@ -66,7 +71,8 @@ curl --fail-with-body -X POST http://localhost:8080/api/admin/users \
 Reset a forgotten password:
 
 ```sh
-curl --fail-with-body -X POST http://localhost:8080/api/admin/users/password \
+curl --fail-with-body --cacert certs/server.crt \
+  -X POST https://localhost:8443/api/admin/users/password \
   -H 'Authorization: Bearer YOUR_ADMIN_SECRET' \
   -H 'Content-Type: application/json' \
   -d '{"phone":"+14155550123","new_password":"another-unique-password"}'
@@ -78,8 +84,8 @@ passwords only over HTTPS.
 
 The print page at `/print/` supports signup and sign-in using a phone number
 and password. Signup creates the account and session atomically. Login returns
-a random session token; the browser stores it in tab session storage and uses
-it for print requests. `GET /api/me` returns the signed-in phone and balance;
+a random session token; the browser keeps it in memory and uses it for print
+requests. `GET /api/me` returns the signed-in phone and balance;
 `POST /api/logout` revokes the current session. The print endpoint requires
 an active user session. Phone ownership is not verified yet; add SMS
 verification before open signup requires confirmed phone ownership.
@@ -112,10 +118,12 @@ document's media type. Optional settings are sent as headers:
 | `X-Print-Sides` | `one-sided`, `two-sided-long-edge`, `two-sided-short-edge` | `one-sided` |
 | `X-Print-Pages` | PDF only, for example `1-3,5` | All pages |
 
-The endpoint spools one request at a time to a temporary file, selects an
-eligible configured CUPS queue using the service's active-job counts, then
-streams the document to CUPS. Its JSON response includes the assigned printer
-and CUPS job ID.
+The endpoint requires HTTPS and an active account session. It checks the file
+signature against the declared format, caps each upload at 64 MiB, spools one
+request at a time to an unlinked temporary file, and validates requested print
+options against the selected queue before submission. It chooses an eligible
+configured CUPS queue using active-job counts, then streams the document to
+CUPS. Its JSON response includes the assigned printer and CUPS job ID.
 
 ```sh
 curl --fail-with-body \
@@ -125,7 +133,8 @@ curl --fail-with-body \
   -H 'X-Print-Sides: two-sided-long-edge' \
   -H 'X-Print-Pages: 1-3,5' \
   --data-binary @document.pdf \
-  http://localhost:8080/api/print
+  --cacert certs/server.crt \
+  https://localhost:8443/api/print
 ```
 
 The browser page exposes these settings in a compact, mobile-friendly form.

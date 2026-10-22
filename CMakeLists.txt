@@ -1,118 +1,114 @@
 cmake_minimum_required(VERSION 3.30)
 
-project(http_server VERSION 0.1.0 LANGUAGES C)
+project(http_server VERSION 0.8.0 LANGUAGES C)
 
 include(CTest)
 
 find_package(Cups REQUIRED)
 find_package(Threads REQUIRED)
 find_package(SQLite3 REQUIRED)
-find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+find_package(OpenSSL 3.0 REQUIRED COMPONENTS SSL Crypto)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-add_executable(http_server
+set(SERVER_SOURCES
     src/main.c
-
     src/http/parser.c
     src/http/request.c
     src/http/response.c
-
+    src/http/transport.c
     src/network/socket.c
-
+    src/network/buffer.c
+    src/network/event_loop.c
+    src/router/router.c
     src/server/config.c
     src/server/connection.c
     src/server/api.c
     src/server/print_api.c
     src/server/server.c
-
+    src/tls/tls.c
     src/static/static.c
     src/static/mime_types.c
-
     src/printing/printing.c
     src/storage/data.c
     src/workers/thread_pool.c
-
     src/utils/logger.c
     src/utils/resource_monitor.c
 )
 
-target_include_directories(http_server PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CUPS_INCLUDE_DIRS}
-)
+function(configure_c_target target)
+    target_include_directories(${target} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_compile_definitions(${target} PRIVATE _POSIX_C_SOURCE=200809L)
+    if(APPLE)
+        target_compile_definitions(${target} PRIVATE _DARWIN_C_SOURCE)
+    endif()
+    set_target_properties(${target} PROPERTIES
+        C_STANDARD "${CMAKE_C_STANDARD_LATEST}"
+        C_STANDARD_REQUIRED ON
+        C_EXTENSIONS OFF
+    )
+    if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(${target} PRIVATE
+            -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+            -Wstrict-prototypes -Wmissing-prototypes -Wformat=2
+        )
+    endif()
+endfunction()
 
+add_executable(http_server ${SERVER_SOURCES})
+configure_c_target(http_server)
+target_include_directories(http_server PRIVATE ${CUPS_INCLUDE_DIRS})
 target_link_libraries(http_server PRIVATE
     ${CUPS_LIBRARIES}
     Threads::Threads
     SQLite3::SQLite3
     OpenSSL::Crypto
+    OpenSSL::SSL
 )
 
-set_target_properties(http_server PROPERTIES
-    C_STANDARD "${CMAKE_C_STANDARD_LATEST}"
-    C_STANDARD_REQUIRED ON
-    C_EXTENSIONS OFF
-)
 message(STATUS "Building ${PROJECT_NAME} with C${CMAKE_C_STANDARD_LATEST}")
-
-target_compile_definitions(http_server PRIVATE _POSIX_C_SOURCE=200809L)
-if(APPLE)
-    target_compile_definitions(http_server PRIVATE _DARWIN_C_SOURCE)
-endif()
-
-if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
-    target_compile_options(http_server PRIVATE
-        -Wall
-        -Wextra
-        -Wpedantic
-        -Wconversion
-        -Wshadow
-        -Wstrict-prototypes
-        -Wmissing-prototypes
-        -Wformat=2
-    )
-endif()
 
 if(BUILD_TESTING)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
-    add_executable(test_parser tests/unit/test_parser.c src/http/parser.c)
-    add_executable(test_http tests/unit/test_http.c src/http/request.c)
-    add_executable(test_buffer tests/unit/test_buffer.c src/http/response.c)
-    add_executable(test_router tests/unit/test_router.c src/static/mime_types.c)
-    add_executable(test_config tests/unit/test_config.c src/server/config.c)
-    add_executable(test_data tests/unit/test_data.c src/storage/data.c)
+    function(add_unit_test target test_name)
+        add_executable(${target} ${ARGN})
+        configure_c_target(${target})
+        target_compile_options(${target} PRIVATE -UNDEBUG)
+        add_test(NAME ${test_name} COMMAND ${target})
+    endfunction()
 
-    foreach(test_target IN ITEMS
-            test_parser test_http test_buffer test_router test_config test_data)
-        target_include_directories(${test_target} PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/include)
-        target_compile_definitions(${test_target} PRIVATE _POSIX_C_SOURCE=200809L)
-        if(APPLE)
-            target_compile_definitions(${test_target} PRIVATE _DARWIN_C_SOURCE)
-        endif()
-        set_target_properties(${test_target} PROPERTIES
-            C_STANDARD "${CMAKE_C_STANDARD_LATEST}"
-            C_STANDARD_REQUIRED ON
-            C_EXTENSIONS OFF)
-        if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
-            target_compile_options(${test_target} PRIVATE
-                -Wall -Wextra -Wpedantic -Wconversion -Wshadow
-                -Wstrict-prototypes -Wmissing-prototypes -Wformat=2
-                -UNDEBUG)
-        endif()
-    endforeach()
-
+    add_unit_test(test_parser unit_parser
+        tests/unit/test_parser.c src/http/parser.c)
+    add_unit_test(test_http unit_http
+        tests/unit/test_http.c src/http/request.c src/http/transport.c)
+    target_link_libraries(test_http PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    add_unit_test(test_buffer unit_response
+        tests/unit/test_buffer.c src/http/response.c src/http/transport.c
+        src/network/buffer.c)
+    target_link_libraries(test_buffer PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    add_unit_test(test_router unit_router
+        tests/unit/test_router.c src/router/router.c)
+    add_unit_test(test_mime_types unit_mime_types
+        tests/unit/test_mime_types.c src/static/mime_types.c)
+    add_unit_test(test_config unit_config
+        tests/unit/test_config.c src/server/config.c)
+    add_unit_test(test_data unit_data_store
+        tests/unit/test_data.c src/storage/data.c)
     target_link_libraries(test_data PRIVATE
         Threads::Threads SQLite3::SQLite3 OpenSSL::Crypto)
+    add_unit_test(test_event_loop unit_event_loop
+        tests/unit/test_event_loop.c src/network/event_loop.c)
+    add_unit_test(test_thread_pool unit_thread_pool
+        tests/unit/test_thread_pool.c src/workers/thread_pool.c)
+    target_link_libraries(test_thread_pool PRIVATE Threads::Threads)
+    add_unit_test(test_static unit_static_files
+        tests/unit/test_static.c src/static/static.c src/static/mime_types.c
+        src/server/config.c src/utils/logger.c)
+    target_link_libraries(test_static PRIVATE Threads::Threads)
 
-    add_test(NAME unit_parser COMMAND test_parser)
-    add_test(NAME unit_http COMMAND test_http)
-    add_test(NAME unit_response COMMAND test_buffer)
-    add_test(NAME unit_mime_types COMMAND test_router)
-    add_test(NAME unit_config COMMAND test_config)
-    add_test(NAME unit_data_store COMMAND test_data)
     add_test(NAME integration_server
         COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_server.py

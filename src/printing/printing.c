@@ -113,8 +113,8 @@ static char *copy_option(const char *name, const cups_dest_t *dest) {
 }
 
 static char *copy_printer_uri(const cups_dest_t *dest) {
-  const char *uri = cupsGetOption("printer-uri-supported", dest->num_options,
-                                  dest->options);
+  const char *uri =
+      cupsGetOption("printer-uri-supported", dest->num_options, dest->options);
   if (uri == NULL) {
     uri = cupsGetOption("device-uri", dest->num_options, dest->options);
   }

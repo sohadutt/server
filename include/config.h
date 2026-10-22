@@ -14,6 +14,9 @@ typedef struct ServerConfig {
   int port;
   char host[64];
   int worker_threads;
+  int tls_enabled;
+  char tls_certificate_file[512];
+  char tls_private_key_file[512];
 
   char log_directory[256];
   char document_root[256];

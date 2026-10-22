@@ -2,6 +2,7 @@
 #define HTTP_REQUEST_H
 
 #include <stddef.h>
+#include "transport.h"
 
 #define HTTP_REQUEST_CAPACITY 4096
 
@@ -11,7 +12,7 @@ typedef struct HttpRequest {
 } HttpRequest;
 
 /* Returns 1 when data was received, 0 on end-of-stream, and -1 on error. */
-int http_request_receive(int client, HttpRequest *request);
+int http_request_receive(HttpTransport *transport, HttpRequest *request);
 /* True when the request has valid headers and no unsupported body framing. */
 int http_request_is_bodyless(const HttpRequest *request);
 void http_request_log_debug(const HttpRequest *request);

@@ -3,11 +3,9 @@
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
-#include <poll.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/socket.h>
 #include <time.h>
 
 #include "logger.h"
@@ -142,8 +140,8 @@ static int remaining_timeout_ms(const struct timespec *deadline) {
   return remaining_ms > INT_MAX ? INT_MAX : (int)remaining_ms;
 }
 
-int http_request_receive(int client, HttpRequest *request) {
-  if (client < 0 || request == NULL) {
+int http_request_receive(HttpTransport *transport, HttpRequest *request) {
+  if (transport == NULL || transport->socket_fd < 0 || request == NULL) {
     errno = EINVAL;
     return -1;
   }
@@ -169,12 +167,7 @@ int http_request_receive(int client, HttpRequest *request) {
       return -1;
     }
 
-    struct pollfd descriptor = {.fd = client, .events = POLLIN};
-    int ready;
-    do {
-      ready = poll(&descriptor, 1, timeout_ms);
-    } while (ready < 0 && errno == EINTR &&
-             (timeout_ms = remaining_timeout_ms(&deadline)) > 0);
+    int ready = http_transport_wait_readable(transport, timeout_ms);
     if (ready == 0) {
       errno = ETIMEDOUT;
       return -1;
@@ -185,8 +178,9 @@ int http_request_receive(int client, HttpRequest *request) {
 
     ssize_t received;
     do {
-      received = recv(client, request->data + request->length,
-                      sizeof(request->data) - 1 - request->length, 0);
+      received = http_transport_read(
+          transport, request->data + request->length,
+          sizeof(request->data) - 1 - request->length);
     } while (received < 0 && errno == EINTR);
     if (received < 0) {
       return -1;

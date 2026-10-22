@@ -4,14 +4,17 @@
 
 `config/server.conf` uses one `key = value` setting per line. Blank lines and
 lines beginning with `#` are ignored. Missing settings use these defaults.
-`document_root` and `mime_types_file` paths are relative to the process working
-directory unless they are absolute paths.
+`document_root`, `mime_types_file`, and TLS certificate/key paths are relative
+to the process working directory unless they are absolute paths.
 
 | Setting | Default | Valid values |
 | --- | --- | --- |
 | `host` | `0.0.0.0` | Host name or IP address |
 | `port` | `8080` | `1`–`65535` |
 | `worker_threads` | `4` | `1`–`64` |
+| `tls_enabled` | `false` | `true`, `false`, `1`, `0` |
+| `tls_certificate_file` | unset | PEM certificate chain; required when TLS is enabled |
+| `tls_private_key_file` | unset | PEM private key matching the certificate; required when TLS is enabled |
 | `document_root` | `public` | Existing directory |
 | `index_file` | `index.html` | Relative file inside document root |
 | `not_found_page` | `404.html` | Relative file inside document root |

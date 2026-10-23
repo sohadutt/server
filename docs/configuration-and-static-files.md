@@ -12,6 +12,8 @@ to the process working directory unless they are absolute paths.
 | `host` | `0.0.0.0` | Host name or IP address |
 | `port` | `8080` | `1`–`65535` |
 | `worker_threads` | `4` | `1`–`64` |
+| `rate_limiting_enabled` (`throttling` alias) | `true` | `true`, `false`, `1`, `0` |
+| `gzip_enabled` | `true` | `true`, `false`, `1`, `0` |
 | `tls_enabled` | `false` | `true`, `false`, `1`, `0` |
 | `tls_certificate_file` | unset | PEM certificate chain; required when TLS is enabled |
 | `tls_private_key_file` | unset | PEM private key matching the certificate; required when TLS is enabled |
@@ -36,13 +38,20 @@ to the process working directory unless they are absolute paths.
 Unknown settings and invalid values stop startup with the config filename and
 line number. With `log_level = debug`, each handled connection also logs
 request timing, CPU time, page faults, context switches, bytes received and
-sent, and the server process's peak resident memory. Authorization and cookie
-values are redacted from logged request headers.
+sent, and the server process's peak resident memory. Authorization, cookie,
+API-key, and query-string values are redacted from debug request logs.
 
 Production uses `log_level = info` by default. Log files use the local date in
 their name, such as `2026-10-22.log`. At startup the logger removes only
 regular files matching `YYYY-MM-DD.log` that are older than
 `log_retention_days`; it leaves other files and symbolic links untouched.
+Each line includes a millisecond timestamp and severity. Connection handling
+logs carry a request ID so TLS, HTTP, print, and resource messages from the same
+request can be followed together. Debug logs include the request method, path
+without its query string, response status, byte counts, duration, and resource
+usage. Authorization, cookie, and API-key header values are redacted. File
+output is buffered for throughput and flushed immediately for warnings and errors; use
+`log_console = true` when watching a live foreground process.
 
 ## Static file mapping
 
@@ -98,3 +107,12 @@ read/write timeouts bound worker time for stalled peers.
 
 The optional CUPS server and encryption settings are applied during process
 startup before printer operations use the CUPS client library.
+
+Set `rate_limiting_enabled = false` to turn off address, session, print, and
+malformed-request limits. Keep it enabled for network-facing deployments.
+
+When `gzip_enabled = true`, the server negotiates gzip only when a request's
+`Accept-Encoding` header permits it. It compresses compressible static
+responses up to 1 MiB; larger streamed files are sent as-is to keep memory use
+bounded. Dynamic `no-store` responses are not compressed. Compressed responses
+include `Content-Encoding: gzip` and `Vary: Accept-Encoding`.

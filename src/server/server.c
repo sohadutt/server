@@ -1,10 +1,12 @@
 #include "server.h"
 
 #include <errno.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
 #include <poll.h>
+#include <string.h>
 #include <unistd.h>
 
 #include <cups/cups.h>
@@ -18,10 +20,11 @@
 #include "thread_pool.h"
 #include "tls.h"
 
-#define SERVER_BACKLOG 128
-#define CONNECTION_QUEUE_PER_WORKER 8U
+#define SERVER_BACKLOG 256
+#define CONNECTION_QUEUE_PER_WORKER 64U
 
 static volatile sig_atomic_t shutdown_requested = 0;
+static atomic_uint_fast64_t next_request_id = 1;
 
 static void request_shutdown(int signal_number) {
   (void)signal_number;
@@ -29,6 +32,7 @@ static void request_shutdown(int signal_number) {
 }
 
 typedef struct {
+  uint64_t request_id;
   int client;
   struct sockaddr_storage peer_address;
   socklen_t peer_address_length;
@@ -62,10 +66,12 @@ static void handle_connection_task(void *argument) {
                         ? HTTP_ENCRYPTION_REQUIRED
                         : HTTP_ENCRYPTION_IF_REQUESTED);
 
+  logger_set_request_id(task->request_id);
   connection_handle(task->client, (const struct sockaddr *)&task->peer_address,
                     task->peer_address_length, task->config,
                     task->static_files, task->data_store, task->tls_server,
                     task->router);
+  logger_set_request_id(0);
   free(task);
 }
 
@@ -78,37 +84,50 @@ static void accept_ready(int listener, short events, void *argument) {
     return;
   }
 
-  struct sockaddr_storage peer_address = {0};
-  socklen_t peer_address_length = sizeof(peer_address);
-  int client = server_socket_accept(listener, &peer_address,
-                                    &peer_address_length);
-  if (client < 0) {
-    if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
-      log_error("Failed to accept connection");
-      context->fatal_error = 1;
-    }
-    return;
-  }
+  for (;;) {
+    struct sockaddr_storage peer_address = {0};
+    socklen_t peer_address_length = sizeof(peer_address);
+    int client = server_socket_accept(listener, &peer_address,
+                                      &peer_address_length);
+    if (client < 0) {
+      if (errno == EINTR)
+        continue;
+      if (errno == EAGAIN || errno == EWOULDBLOCK)
+        return;
 
-  ConnectionTask *task = malloc(sizeof(*task));
-  if (task == NULL) {
-    close(client);
-    return;
-  }
-  *task = (ConnectionTask){
-      .client = client,
-      .peer_address = peer_address,
-      .peer_address_length = peer_address_length,
-      .config = context->config,
-      .static_files = context->static_files,
-      .data_store = context->data_store,
-      .tls_server = context->tls_server,
-      .router = context->router,
-  };
-  if (thread_pool_submit(context->workers, handle_connection_task, task) != 0) {
-    close(client);
-    free(task);
-    log_debug("Connection queue full; closed incoming connection");
+      int accept_error = errno;
+      log_warnf("Accept failed: %s", strerror(accept_error));
+      /* Resource pressure is transient; only a broken listener is fatal. */
+      if (accept_error == EBADF || accept_error == EINVAL ||
+          accept_error == ENOTSOCK)
+        context->fatal_error = 1;
+      return;
+    }
+
+    ConnectionTask *task = malloc(sizeof(*task));
+    if (task == NULL) {
+      close(client);
+      log_warn("Could not allocate a connection task; connection closed");
+      continue;
+    }
+    *task = (ConnectionTask){
+        .request_id = atomic_fetch_add_explicit(&next_request_id, 1,
+                                                memory_order_relaxed),
+        .client = client,
+        .peer_address = peer_address,
+        .peer_address_length = peer_address_length,
+        .config = context->config,
+        .static_files = context->static_files,
+        .data_store = context->data_store,
+        .tls_server = context->tls_server,
+        .router = context->router,
+    };
+    if (thread_pool_submit(context->workers, handle_connection_task, task) !=
+        0) {
+      close(client);
+      free(task);
+      log_debug("Connection queue full; closed incoming connection");
+    }
   }
 }
 
@@ -158,7 +177,8 @@ int server_start(const ServerConfig *config) {
 
   DataStore *data_store = data_store_open(config->database_path);
   if (data_store == NULL) {
-    log_error("Could not open the configured user database");
+    log_errorf("Could not initialize user database '%s'",
+               config->database_path);
     static_file_server_destroy(&static_files);
     tls_server_destroy(tls_server);
     return -1;
@@ -229,11 +249,10 @@ int server_start(const ServerConfig *config) {
     return -1;
   }
 
-  char message[160];
-  snprintf(message, sizeof(message), "Server listening on %s://%s:%d",
-           config->tls_enabled ? "https" : "http", config->host,
-           config->port);
-  log_info(message);
+  log_infof("Listening on %s://%s:%d with %zu worker(s) and queue capacity %zu",
+            config->tls_enabled ? "https" : "http", config->host,
+            config->port, worker_count,
+            worker_count * CONNECTION_QUEUE_PER_WORKER);
 
   int loop_result = 0;
   while (!accept_context.fatal_error && !shutdown_requested) {

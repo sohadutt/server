@@ -416,14 +416,16 @@ int static_file_server_init(StaticFileServer *server,
   memset(server, 0, sizeof(*server));
   server->document_root_fd = -1;
   char resolved_root[PATH_MAX];
-  if (realpath(config->document_root, resolved_root) == NULL ||
-      strlen(resolved_root) >= sizeof(server->document_root) ||
+  if (realpath(config->document_root, resolved_root) == NULL) {
+    int root_error = errno;
+    log_errorf("Could not resolve document root '%s': %s",
+               config->document_root, strerror(root_error));
+    return -1;
+  }
+  if (strlen(resolved_root) >= sizeof(server->document_root) ||
       copy_string(server->document_root, sizeof(server->document_root),
                   resolved_root) != 0) {
-    char message[384];
-    snprintf(message, sizeof(message), "Invalid document root '%s'",
-             config->document_root);
-    log_error(message);
+    log_error("Resolved document root path is too long");
     return -1;
   }
 
@@ -431,10 +433,22 @@ int static_file_server_init(StaticFileServer *server,
       open(server->document_root,
            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
   struct stat root_status;
-  if (server->document_root_fd < 0 ||
-      fstat(server->document_root_fd, &root_status) != 0 ||
-      !S_ISDIR(root_status.st_mode)) {
-    log_error("Could not securely open the document root directory");
+  if (server->document_root_fd < 0) {
+    int root_error = errno;
+    log_errorf("Could not securely open document root '%s': %s",
+               server->document_root, strerror(root_error));
+    static_file_server_destroy(server);
+    return -1;
+  }
+  if (fstat(server->document_root_fd, &root_status) != 0) {
+    int root_error = errno;
+    log_errorf("Could not inspect document root '%s': %s",
+               server->document_root, strerror(root_error));
+    static_file_server_destroy(server);
+    return -1;
+  }
+  if (!S_ISDIR(root_status.st_mode)) {
+    log_errorf("Document root '%s' is not a directory", server->document_root);
     static_file_server_destroy(server);
     return -1;
   }

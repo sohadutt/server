@@ -3,9 +3,12 @@
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "logger.h"
 
 struct TlsServer {
   SSL_CTX *context;
@@ -78,13 +81,14 @@ TlsServer *tls_server_create(const char *certificate_file,
   return server;
 
 fail: {
-  char message[256];
   unsigned long error = ERR_get_error();
-  if (error != 0)
+  if (error != 0) {
+    char message[256];
     ERR_error_string_n(error, message, sizeof(message));
-  else
-    snprintf(message, sizeof(message), "TLS context configuration failed");
-  fprintf(stderr, "TLS setup failed: %s\n", message);
+    log_errorf("TLS context setup failed: %s", message);
+  } else {
+    log_error("TLS context setup failed without an OpenSSL error detail");
+  }
   tls_server_destroy(server);
   return NULL;
 }
@@ -101,9 +105,47 @@ SSL *tls_server_accept(TlsServer *server, int socket_fd) {
   if (server == NULL || socket_fd < 0)
     return NULL;
   SSL *connection = SSL_new(server->context);
-  if (connection == NULL)
+  if (connection == NULL) {
+    unsigned long error = ERR_get_error();
+    char detail[256];
+    if (error != 0) {
+      ERR_error_string_n(error, detail, sizeof(detail));
+      log_debugf("Could not allocate TLS connection state: %s", detail);
+    } else {
+      log_debug("Could not allocate TLS connection state");
+    }
     return NULL;
-  if (SSL_set_fd(connection, socket_fd) != 1 || SSL_accept(connection) != 1) {
+  }
+  ERR_clear_error();
+  if (SSL_set_fd(connection, socket_fd) != 1) {
+    unsigned long error = ERR_get_error();
+    char detail[256];
+    if (error != 0) {
+      ERR_error_string_n(error, detail, sizeof(detail));
+      log_debugf("Could not attach socket to TLS connection: %s", detail);
+    } else {
+      log_debug("Could not attach socket to TLS connection");
+    }
+    SSL_free(connection);
+    return NULL;
+  }
+  errno = 0;
+  int accept_result = SSL_accept(connection);
+  if (accept_result != 1) {
+    int socket_error = errno;
+    int ssl_error = SSL_get_error(connection, accept_result);
+    unsigned long error = ERR_get_error();
+    if (error != 0) {
+      char detail[256];
+      ERR_error_string_n(error, detail, sizeof(detail));
+      log_debugf("TLS handshake failed (SSL error %d): %s", ssl_error,
+                 detail);
+    } else if (socket_error != 0) {
+      log_debugf("TLS handshake failed (SSL error %d): %s", ssl_error,
+                 strerror(socket_error));
+    } else {
+      log_debugf("TLS handshake failed (SSL error %d)", ssl_error);
+    }
     SSL_free(connection);
     return NULL;
   }

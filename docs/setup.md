@@ -1,10 +1,15 @@
 # Command-line setup
 
-Run the one-command local setup from the repository root:
+Run the interactive menu from the repository root:
 
 ```sh
 ./scripts/setup.sh
 ```
+
+The menu offers guided HTTPS setup, config generation, build checks, CUPS
+printer setup, static app publishing, and development certificates. Use
+`./scripts/setup.sh menu` to reopen it explicitly. All actions also have
+non-interactive command forms.
 
 It checks build dependencies, builds the C server, creates a localhost
 development certificate when one is absent, writes a private TLS-enabled
@@ -23,13 +28,20 @@ Useful options:
 ```sh
 ./scripts/setup.sh --help
 ./scripts/setup.sh --check
+./scripts/setup.sh --start
 ./scripts/setup.sh --with-cups
 ./scripts/setup.sh --bind 0.0.0.0 --name printer.example.test --port 8443
 ./scripts/setup.sh --force-cert
+./scripts/setup.sh config init build/local-setup/server.conf
 ```
 
 `--check` configures and builds without generating credentials or starting
-services. `--with-cups` starts and enables the host CUPS service; it can ask
+services. `--start` launches an existing binary and config without rebuilding;
+it prefers `build/local-setup/server.conf` unless a config is supplied with
+`--config`. `config init` copies the checked-in starter config to a new path
+with private file permissions and refuses to replace an existing file unless
+`--force` is supplied. `--config FILE` selects the base config used when the
+guided flow writes its generated runtime config. `--with-cups` starts and enables the host CUPS service; it can ask
 for administrator privileges. It does not install operating-system packages
 or add a printer queue. All setup tasks are available through the same script:
 

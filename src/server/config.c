@@ -129,6 +129,13 @@ static int set_value(ServerConfig *config, const char *key, const char *value) {
   if (strcmp(key, "worker_threads") == 0) {
     return parse_int(value, 1, 64, &config->worker_threads);
   }
+  if (strcmp(key, "rate_limiting_enabled") == 0 ||
+      strcmp(key, "throttling") == 0) {
+    return parse_bool(value, &config->rate_limiting_enabled);
+  }
+  if (strcmp(key, "gzip_enabled") == 0) {
+    return parse_bool(value, &config->gzip_enabled);
+  }
   if (strcmp(key, "document_root") == 0) {
     return copy_value(config->document_root, sizeof(config->document_root),
                       value);
@@ -210,6 +217,8 @@ void config_defaults(ServerConfig *config) {
   config->log_retention_days = 30;
   config->port = 8080;
   config->worker_threads = 4;
+  config->rate_limiting_enabled = 1;
+  config->gzip_enabled = 1;
   snprintf(config->host, sizeof(config->host), "%s", "0.0.0.0");
   snprintf(config->log_directory, sizeof(config->log_directory), "%s", "logs");
   snprintf(config->document_root, sizeof(config->document_root), "%s",

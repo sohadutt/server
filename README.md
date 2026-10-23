@@ -16,9 +16,10 @@ ctest --test-dir build --output-on-failure
 Requirements, test details, and setup/TLS steps are in the
 [build and testing guide](docs/build-and-testing.md).
 
-For a guided command-line setup that generates local TLS credentials and starts
-the server, run `./scripts/setup.sh`. See the [setup guide](docs/setup.md) for
-LAN access and CUPS options.
+Run `./scripts/setup.sh` for an interactive setup menu, or use its subcommands
+for scripted setup. The guided local HTTPS flow generates a private runtime
+config and development TLS credentials. See the [setup guide](docs/setup.md)
+for CLI options, LAN access, and CUPS setup.
 
 ## Guides
 

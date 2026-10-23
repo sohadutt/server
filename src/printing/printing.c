@@ -271,7 +271,9 @@ int discover_printers(PrintService *service, int timeout_ms) {
                      discovery_callback, &context) ||
       context.failed) {
     free_printers(&context.discovered);
-    log_error("Failed to discover CUPS printers");
+    const char *cups_error = cupsLastErrorString();
+    log_errorf("Failed to discover CUPS printers: %s",
+               cups_error != NULL ? cups_error : "unknown CUPS error");
     return -1;
   }
 
@@ -279,10 +281,7 @@ int discover_printers(PrintService *service, int timeout_ms) {
   service->discovered_printers = context.discovered.printers;
   service->discovered_count = context.discovered.count;
 
-  char message[128];
-  snprintf(message, sizeof(message), "Discovered %zu printer(s)",
-           service->discovered_count);
-  log_debug(message);
+  log_debugf("Discovered %zu printer(s)", service->discovered_count);
   return 0;
 }
 
@@ -296,7 +295,9 @@ int get_printers(PrintService *service) {
   int num_dests = cupsGetDests2(CUPS_HTTP_DEFAULT, &dests);
 
   if (num_dests < 0) {
-    log_error("Failed to retrieve printers");
+    const char *cups_error = cupsLastErrorString();
+    log_errorf("Failed to retrieve CUPS destinations: %s",
+               cups_error != NULL ? cups_error : "unknown CUPS error");
     return -1;
   }
 
@@ -342,10 +343,7 @@ int get_printers(PrintService *service) {
   service->printers = printers;
   service->count = (size_t)num_dests;
 
-  char buffer[128];
-  snprintf(buffer, sizeof(buffer), "Loaded %zu CUPS destination(s)",
-           service->count);
-  log_debug(buffer);
+  log_debugf("Loaded %zu CUPS destination(s)", service->count);
 
   return 0;
 }
@@ -481,12 +479,9 @@ Printer *select_printer(PrintService *service) {
 
   Printer *selected = best_free != NULL ? best_free : best_loaded;
   if (selected != NULL) {
-    char message[256];
-    snprintf(message, sizeof(message),
-             "Selected printer '%s' (%zu active job(s), %s)",
-             selected->name != NULL ? selected->name : "unknown",
-             selected->queued_jobs, printer_state_to_string(selected->state));
-    log_debug(message);
+    log_debugf("Selected printer '%s' (%zu active job(s), %s)",
+               selected->name != NULL ? selected->name : "unknown",
+               selected->queued_jobs, printer_state_to_string(selected->state));
   }
 
   return selected;

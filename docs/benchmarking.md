@@ -32,10 +32,13 @@ for API load runs.
 
 ## Results and options
 
-Each stage reports requests per second, successes, failures, p50/p95 latency,
-and average/peak server RSS. Saturation can be signaled by errors, a throughput
-drop, or a throughput plateau while latency rises. The ramp stops at the
-selected maximum, or at the first detected saturation when
+Each stage reports successful requests per second separately from attempted
+requests per second, successes, failures, p50/p95 latency, and average/peak
+server RSS. Failures include a reason such as an HTTP status, TLS error,
+timeout, or socket error. This helps distinguish server overload from client
+limits such as ephemeral-port exhaustion. Saturation can be signaled by errors,
+a throughput drop, or a throughput plateau while latency rises. The ramp stops
+at the selected maximum, or at the first detected saturation when
 `--stop-on-saturation` is supplied.
 
 The default maximum is 512 concurrent clients and can be raised to 4096. The
@@ -59,15 +62,25 @@ process rather than the proxy. Options include:
 
 For a server ceiling measurement, run the load generator from another machine
 on the same network so it does not compete for CPU, memory, file descriptors,
-and ephemeral ports. The configured `worker_threads` caps server workers at
-64. Debug logging records every request and may become the bottleneck; use a
-non-debug log level and disable console/file logging for a maximum-throughput
-run.
+and ephemeral ports. This benchmark opens a fresh connection per request, so a
+localhost run can exhaust the client's ephemeral ports and distort results.
+The configured `worker_threads` caps server workers at 64. The server uses a
+bounded queue of up to 64 waiting connections per worker; very high concurrency
+may still be limited by the process file-descriptor limit. Debug logging records
+each request and may become the bottleneck; use a non-debug log level and
+disable console/file logging for a maximum-throughput run.
 
 RSS is whole-process memory, not a per-client allocation estimate. Results
 depend on the host, network, database, and build configuration.
 
 
+The table below is a historical run from before the listener-drain, worker
+queue, and benchmark-accounting fixes. Its throughput column counted attempts,
+so it must not be interpreted as successful requests per second. Rerun the
+benchmark with the current version to obtain comparable success rates and
+failure reasons.
+
+```text
 ./scripts/benchmark.sh --path / --max-concurrency 4000 --step 32 --stage-duration 10
 Target: https://localhost:8443/
 Server PID: 70020; baseline RSS: 10.0 MiB
@@ -83,3 +96,4 @@ Concurrency | Throughput | Successful | Failed | Latency | Server RSS
   224 clients |    4908.7 req/s |     3438 ok |  45649 failed | p50    38.3 ms | p95   115.0 ms | RSS avg/peak 12.3/12.3 MiB
   256 clients |    4864.8 req/s |     2954 ok |  45694 failed | p50    45.1 ms | p95   131.0 ms | RSS avg/peak 12.3/12.3 MiB
   288 clients |    4618.7 req/s |     2541 ok |  43646 failed | p50    54.0 ms | p95   147.7 ms | RSS avg/peak 12.5/12.6 MiB
+```

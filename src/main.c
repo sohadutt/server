@@ -32,7 +32,10 @@ int main(int argc, char **argv) {
     cupsSetEncryption(HTTP_ENCRYPTION_REQUIRED);
   }
 
-  log_info("Starting Server");
+  log_infof("Logging initialized: console=%s daily_file=%s directory='%s'",
+            config.log_console || config.log_level == LOG_DEBUG ? "on" : "off",
+            config.log_file ? "on" : "off", config.log_directory);
+  log_infof("Starting server with configuration '%s'", config_path);
   int result = server_start(&config);
 
   logger_close();

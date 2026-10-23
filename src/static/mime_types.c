@@ -88,10 +88,9 @@ int mime_types_load(MimeTypes *types, const char *filename) {
 
   FILE *file = fopen(filename, "r");
   if (file == NULL) {
-    char message[384];
-    snprintf(message, sizeof(message), "Cannot open MIME types file '%s': %s",
-             filename, strerror(errno));
-    log_error(message);
+    int file_error = errno;
+    log_errorf("Cannot open MIME types file '%s': %s", filename,
+               strerror(file_error));
     return -1;
   }
 
@@ -120,20 +119,16 @@ int mime_types_load(MimeTypes *types, const char *filename) {
     }
 
     if (result != 0) {
-      char message[384];
-      snprintf(message, sizeof(message),
-               "%s:%u: expected '<extension> <media/type>'", filename,
-               line_number);
-      log_error(message);
+      log_errorf("%s:%u: expected '<extension> <media/type>'", filename,
+                 line_number);
       break;
     }
   }
 
   if (ferror(file)) {
-    char message[384];
-    snprintf(message, sizeof(message), "Failed reading MIME types file '%s'",
-             filename);
-    log_error(message);
+    int read_error = errno;
+    log_errorf("Failed reading MIME types file '%s': %s", filename,
+               read_error != 0 ? strerror(read_error) : "I/O error");
     result = -1;
   }
   fclose(file);

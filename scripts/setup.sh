@@ -9,8 +9,11 @@ project_dir="$(cd -- "$script_dir/.." && pwd)"
 usage() {
   cat <<'HELP'
 Usage:
-  scripts/setup.sh [run options]       Build and start local HTTPS (default)
+  scripts/setup.sh                     Open the interactive setup menu
+  scripts/setup.sh [run options]       Build, configure, and start local HTTPS
+  scripts/setup.sh menu                Open the interactive setup menu
   scripts/setup.sh check               Configure and build only
+  scripts/setup.sh config init [path]  Generate a private config from defaults
   scripts/setup.sh cert [options]      Create a development TLS certificate
   scripts/setup.sh cups ACTION         Manage CUPS and printer queues
   scripts/setup.sh server [options]    Build and run a configured server
@@ -21,10 +24,11 @@ Run options:
   --bind ADDRESS  Address to listen on (default: 127.0.0.1)
   --name HOST     DNS name or IP in the certificate (default: localhost)
   --port PORT     HTTPS port (default: 8443)
+  --config FILE   Base config to use when generating the runtime config
   --with-cups     Start/enable the system CUPS service before building
   --force-cert    Replace an existing development certificate and key
   --check         Configure and build only; do not create secrets or start
-  --start         Only Starts the server with existing build and config
+  --start         Start an existing build with an existing config; skip build
   -h, --help      Show this help
 
 Certificate:
@@ -53,6 +57,57 @@ the app at `/NAME/` and enable SPA route fallback.
 HELP
 }
 
+config_command() {
+  local action="${1:-init}"
+  if (($#)); then shift; fi
+  case "$action" in
+    init)
+      local target="$project_dir/build/local-setup/server.conf" force=0 path_set=0
+      while (($#)); do
+        case "$1" in
+          --force) force=1; shift ;;
+          -h|--help)
+            printf 'Usage: setup.sh config init [path] [--force]\n'
+            return 0
+            ;;
+          -* ) printf 'Unknown config option: %s\n' "$1" >&2; return 2 ;;
+          *)
+            ((path_set == 0)) || {
+              printf 'Only one output path may be provided.\n' >&2; return 2;
+            }
+            target="$1"
+            [[ "$target" == /* ]] || target="$project_dir/$target"
+            path_set=1
+            shift
+            ;;
+        esac
+      done
+      local template="$project_dir/config/server.conf" target_dir target_name temp_file
+      [[ -f "$template" ]] || { printf 'Config template not found: %s\n' "$template" >&2; return 1; }
+      target_dir="$(dirname -- "$target")"
+      target_name="$(basename -- "$target")"
+      mkdir -p -- "$target_dir"
+      if [[ -e "$target" && "$force" -ne 1 ]]; then
+        printf 'Config already exists: %s (pass --force to replace it).\n' "$target" >&2
+        return 1
+      fi
+      temp_file="$(mktemp "$target_dir/.${target_name}.XXXXXX")" || return
+      if ! cp -- "$template" "$temp_file" || ! chmod 600 "$temp_file" ||
+         ! mv -f -- "$temp_file" "$target"; then
+        rm -f -- "$temp_file"
+        printf 'Could not write config file: %s\n' "$target" >&2
+        return 1
+      fi
+      printf 'Generated config: %s (mode 0600)\n' "$target"
+      printf 'Edit it before starting the server. Keep TLS keys and admin tokens private.\n'
+      ;;
+    -h|--help|help)
+      printf 'Usage: setup.sh config init [path] [--force]\n'
+      ;;
+    *) printf 'Unknown config action: %s\n' "$action" >&2; return 2 ;;
+  esac
+}
+
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
     printf 'Required command not found: %s\n' "$1" >&2
@@ -67,7 +122,7 @@ build_project() {
 }
 
 make_certificate() {
-  local force=0 hostname=localhost days=365 san cert_dir key_file cert_file
+  local force=0 hostname=localhost days=365 san cert_dir key_file cert_file temp_dir
   if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
     sed -n '/^Certificate:/,/^CUPS actions:/p' < <(usage) | sed '$d'
     return 0
@@ -89,14 +144,28 @@ make_certificate() {
   fi
   cert_dir="$project_dir/certs"; key_file="$cert_dir/server.key"; cert_file="$cert_dir/server.crt"
   mkdir -p "$cert_dir"
+  chmod 700 "$cert_dir"
   if (( ! force )) && { [[ -e "$key_file" ]] || [[ -e "$cert_file" ]]; }; then
     printf 'Certificate or key already exists. Use --force to replace it.\n' >&2; return 1
   fi
   umask 077
+  temp_dir="$(mktemp -d "$cert_dir/.certificate.XXXXXX")" || return
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -sha256 -noenc \
     -days "$days" -subj '/CN=Development Certificate' -addext "subjectAltName=$san" \
-    -keyout "$key_file" -out "$cert_file"
-  chmod 600 "$key_file"; chmod 644 "$cert_file"
+    -keyout "$temp_dir/server.key" -out "$temp_dir/server.crt" || {
+      rm -rf -- "$temp_dir"
+      return 1
+    }
+  chmod 600 "$temp_dir/server.key" && chmod 644 "$temp_dir/server.crt" || {
+    rm -rf -- "$temp_dir"
+    return 1
+  }
+  mv -f -- "$temp_dir/server.key" "$key_file" &&
+    mv -f -- "$temp_dir/server.crt" "$cert_file" || {
+      rm -rf -- "$temp_dir"
+      return 1
+    }
+  rmdir "$temp_dir"
   printf 'Created development certificate for %s (%s days).\n' "$hostname" "$days"
   printf 'Certificate: %s\nPrivate key: %s\n' "$cert_file" "$key_file"
   printf 'This self-signed certificate is for development; use a trusted CA certificate for public deployments.\n'
@@ -419,25 +488,136 @@ static_command() {
   esac
 }
 
+interactive_menu() {
+  local choice bind_address certificate_name port config_path action app_name app_dir
+  while true; do
+    local action_rc=0
+    printf '\nConfigurable Web and Print Server setup\n'
+    printf '  1) Guided local HTTPS setup and start\n'
+    printf '  2) Generate a starter server config\n'
+    printf '  3) Configure and build only\n'
+    printf '  4) CUPS and printer setup\n'
+    printf '  5) Publish a static/Vite app\n'
+    printf '  6) Generate a development TLS certificate\n'
+    printf '  7) Show command help\n'
+    printf '  0) Exit\n'
+    read -r -p 'Choose an option: ' choice || { printf '\n'; return 0; }
+    case "$choice" in
+      1)
+        read -r -p 'Bind address [127.0.0.1]: ' bind_address || return 0
+        read -r -p 'Certificate hostname [localhost]: ' certificate_name || return 0
+        read -r -p 'HTTPS port [8443]: ' port || return 0
+        bind_address="${bind_address:-127.0.0.1}"
+        certificate_name="${certificate_name:-localhost}"
+        port="${port:-8443}"
+        run_local --bind "$bind_address" --name "$certificate_name" --port "$port" || action_rc=$?
+        ;;
+      2)
+        read -r -p 'Output config [build/local-setup/server.conf]: ' config_path || return 0
+        config_command init "${config_path:-build/local-setup/server.conf}" || action_rc=$?
+        ;;
+      3)
+        if build_project; then printf 'Build completed.\n'
+        else action_rc=$?
+        fi
+        ;;
+      4)
+        printf '\nCUPS\n  1) Start CUPS\n  2) Show status\n  3) Discover printers\n  4) Add a driverless printer\n  0) Back\n'
+        read -r -p 'Choose an option: ' action || return 0
+        case "$action" in
+          1) cups_command start || action_rc=$? ;;
+          2) cups_command status || action_rc=$? ;;
+          3) cups_command discover || action_rc=$? ;;
+          4) cups_command add-printer || action_rc=$? ;;
+          0) ;;
+          *) printf 'Choose a listed option.\n' >&2 ;;
+        esac
+        ;;
+      5)
+        printf '\nStatic app\n  1) Build and publish a Vite app\n  2) Publish an existing build\n  3) List published apps\n  0) Back\n'
+        read -r -p 'Choose an option: ' action || return 0
+        case "$action" in
+          1)
+            read -r -p 'App name: ' app_name || return 0
+            read -r -p 'Source directory: ' app_dir || return 0
+            static_command build "$app_name" "$app_dir" || action_rc=$?
+            ;;
+          2)
+            read -r -p 'App name: ' app_name || return 0
+            read -r -p 'Build directory: ' app_dir || return 0
+            static_command add "$app_name" "$app_dir" || action_rc=$?
+            ;;
+          3) static_command list || action_rc=$? ;;
+          0) ;;
+          *) printf 'Choose a listed option.\n' >&2 ;;
+        esac
+        ;;
+      6)
+        read -r -p 'Certificate hostname or IP [localhost]: ' certificate_name || return 0
+        make_certificate "${certificate_name:-localhost}" 365 || action_rc=$?
+        ;;
+      7) usage || action_rc=$? ;;
+      0) return 0 ;;
+      *) printf 'Choose a listed option.\n' >&2 ;;
+    esac
+    if ((action_rc != 0)); then
+      printf 'That action did not complete successfully (exit %d).\n' "$action_rc" >&2
+    fi
+  done
+}
+
 run_local() {
-  local bind_address=127.0.0.1 certificate_name=localhost port=8443 with_cups=0 force_cert=0 check_only=0
+  local bind_address=127.0.0.1 certificate_name=localhost port=8443
+  local with_cups=0 force_cert=0 check_only=0 start_only=0
+  local base_config="$project_dir/config/server.conf" selected_config=""
   while (($#)); do
     case "$1" in
       --bind) (($# >= 2)) || { usage >&2; return 2; }; bind_address=$2; shift 2 ;;
       --name) (($# >= 2)) || { usage >&2; return 2; }; certificate_name=$2; shift 2 ;;
       --port) (($# >= 2)) || { usage >&2; return 2; }; port=$2; shift 2 ;;
+      --config) (($# >= 2)) || { usage >&2; return 2; }; base_config=$2; shift 2 ;;
       --with-cups) with_cups=1; shift ;;
       --force-cert) force_cert=1; shift ;;
       --check) check_only=1; shift ;;
+      --start) start_only=1; shift ;;
       -h|--help) usage; return 0 ;;
       *) printf 'Unknown option: %s\n' "$1" >&2; usage >&2; return 2 ;;
     esac
   done
+  if [[ "$base_config" != /* ]]; then base_config="$project_dir/$base_config"; fi
+  if ((start_only && (check_only || force_cert || with_cups))); then
+    printf '%s\n' '--start cannot be combined with --check, --force-cert, or --with-cups.' >&2
+    return 2
+  fi
+  if ((start_only)) &&
+     [[ "$bind_address" != 127.0.0.1 || "$certificate_name" != localhost ||
+        "$port" != 8443 ]]; then
+    printf '%s\n' '--start uses the existing config; remove --bind, --name, and --port.' >&2
+    return 2
+  fi
+  if ((start_only)); then
+    selected_config="${base_config:-$project_dir/build/local-setup/server.conf}"
+    if [[ "$selected_config" == "$project_dir/config/server.conf" &&
+          -f "$project_dir/build/local-setup/server.conf" ]]; then
+      selected_config="$project_dir/build/local-setup/server.conf"
+    fi
+    [[ -x "$project_dir/build/http_server" ]] || {
+      printf 'Server binary is missing. Run setup.sh check first.\n' >&2; return 1;
+    }
+    [[ -f "$selected_config" ]] || {
+      printf 'Config file not found: %s\n' "$selected_config" >&2; return 1;
+    }
+    exec "$project_dir/build/http_server" "$selected_config"
+  fi
+  [[ -f "$base_config" ]] || {
+    printf 'Base config not found: %s (generate one with setup.sh config init).\n' "$base_config" >&2
+    return 1
+  }
   [[ "$port" =~ ^[0-9]{1,5}$ ]] && ((10#$port >= 1 && 10#$port <= 65535)) || {
     printf 'Port must be an integer from 1 to 65535.\n' >&2; return 2; }
   [[ "$bind_address" =~ ^[A-Za-z0-9._:%-]+$ && -n "$certificate_name" && "$certificate_name" != *$'\n'* ]] || {
     printf 'Bind address and certificate name must be non-empty single-line values.\n' >&2; return 2; }
-  if ((with_cups)); then cups_start || return; fi
+  if ((with_cups && !check_only)); then cups_start || return; fi
   build_project || return
   ((check_only)) && { printf 'Build and dependency checks completed.\n'; return 0; }
   local certificate="$project_dir/certs/server.crt" private_key="$project_dir/certs/server.key"
@@ -446,16 +626,42 @@ run_local() {
   elif [[ ! -f "$certificate" || ! -f "$private_key" ]]; then
     printf 'Only part of the TLS certificate pair exists. Repair it with --force-cert.\n' >&2; return 1
   fi
-  local runtime_dir="$project_dir/build/local-setup" admin_token_file runtime_config admin_token
-  mkdir -p "$runtime_dir"; chmod 700 "$runtime_dir"
+  if ((!force_cert)); then
+    require_command openssl || return
+    if [[ "$certificate_name" == *:* || "$certificate_name" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      openssl x509 -in "$certificate" -noout -checkip "$certificate_name" >/dev/null 2>&1 || {
+        printf 'The existing certificate does not match %s. Regenerate it with --force-cert.\n' "$certificate_name" >&2
+        return 1
+      }
+    else
+      openssl x509 -in "$certificate" -noout -checkhost "$certificate_name" >/dev/null 2>&1 || {
+        printf 'The existing certificate does not match %s. Regenerate it with --force-cert.\n' "$certificate_name" >&2
+        return 1
+      }
+    fi
+  fi
+  local runtime_dir="$project_dir/build/local-setup" admin_token_file runtime_config runtime_tmp admin_token
+  mkdir -p "$runtime_dir" && chmod 700 "$runtime_dir" || return
   admin_token_file="$runtime_dir/admin.token"
-  if [[ ! -s "$admin_token_file" ]]; then openssl rand -hex 32 > "$admin_token_file"; fi
-  chmod 600 "$admin_token_file"
+  if [[ ! -s "$admin_token_file" ]]; then
+    local token_tmp
+    token_tmp="$(mktemp "$runtime_dir/.admin.token.XXXXXX")" || return
+    if ! openssl rand -hex 32 > "$token_tmp" || ! chmod 600 "$token_tmp" ||
+       ! mv -f -- "$token_tmp" "$admin_token_file"; then
+      rm -f -- "$token_tmp"
+      printf 'Could not generate admin credential.\n' >&2
+      return 1
+    fi
+  fi
+  chmod 600 "$admin_token_file" || return
   admin_token="$(<"$admin_token_file")"
   [[ "$admin_token" =~ ^[A-Fa-f0-9]{64}$ ]] || { printf 'Admin-token file is invalid: %s\n' "$admin_token_file" >&2; return 1; }
   runtime_config="$runtime_dir/server.conf"
-  {
-    cat "$project_dir/config/server.conf"
+  runtime_tmp="$(mktemp "$runtime_dir/.server.conf.XXXXXX")" || return
+  if ! {
+    # Config parsing applies the last value, allowing setup values to override
+    # the base file while preserving all of its application settings.
+    cat "$base_config"
     cat <<CONFIG
 
 # Generated by scripts/setup.sh. Keep this file private.
@@ -465,12 +671,18 @@ tls_enabled = true
 tls_certificate_file = $certificate
 tls_private_key_file = $private_key
 
-# turn on throttling to avoid DoS attacks in development
-throttling = false
 admin_api_token = $admin_token
 CONFIG
-  } > "$runtime_config"
-  chmod 600 "$runtime_config"
+  } > "$runtime_tmp"; then
+    rm -f -- "$runtime_tmp"
+    printf 'Could not generate runtime config: %s\n' "$runtime_config" >&2
+    return 1
+  fi
+  if ! chmod 600 "$runtime_tmp" || ! mv -f -- "$runtime_tmp" "$runtime_config"; then
+    rm -f -- "$runtime_tmp"
+    printf 'Could not install runtime config: %s\n' "$runtime_config" >&2
+    return 1
+  fi
   printf 'Starting HTTPS at https://%s:%s/\n' "$certificate_name" "$port"
   printf 'Admin credential is stored in %s (mode 0600).\n' "$admin_token_file"
   printf 'This development certificate must be trusted by your browser/device.\n'
@@ -480,11 +692,17 @@ CONFIG
 cd "$project_dir"
 case "${1:-}" in
   -h|--help) usage ;;
+  menu) shift; (($# == 0)) || { usage >&2; exit 2; }; interactive_menu ;;
+  config) shift; config_command "$@" ;;
   cert) shift; make_certificate "$@" ;;
   cups) shift; cups_command "$@" ;;
   static) shift; static_command "$@" ;;
   server) shift; server_command "$@" ;;
   service-unit) shift; service_unit_command "$@" ;;
   check) shift; (($# == 0)) || { usage >&2; exit 2; }; build_project ;;
-  *) run_local "$@" ;;
+  *)
+    if (($# == 0)) && [[ -t 0 ]]; then interactive_menu
+    else run_local "$@"
+    fi
+    ;;
 esac

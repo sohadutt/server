@@ -1,12 +1,9 @@
 #include "request.h"
-#include "http.h"
-#include "logger.h"
+#include "request.h"
 
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
-
-void log_debug(const char *message) { (void)message; }
 
 static HttpRequest make_request(const char *text) {
   HttpRequest request = {0};

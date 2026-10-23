@@ -105,22 +105,18 @@ void resource_monitor_log_request(const ResourceUsageSnapshot *start,
   long long system_ms = system_us / 1000LL;
   long long system_sub_ms = system_us % 1000LL;
 
-  char message[768];
-  snprintf(message, sizeof(message),
-           "Request resources: request=\"%s\" wall=%lld.%03lldms "
-           "user_cpu=%lld.%03lldms system_cpu=%lld.%03lldms "
-           "process_peak_rss=%lldKB minor_faults=%lld "
-           "major_faults=%lld voluntary_context_switches=%lld "
-           "involuntary_context_switches=%lld bytes_in=%zu bytes_out=%zu",
-           request, wall_ms, wall_sub_ms, user_ms, user_sub_ms, system_ms,
-           system_sub_ms,
-           end.peak_rss_kb,
-           nonnegative_delta(end.minor_page_faults, start->minor_page_faults),
-           nonnegative_delta(end.major_page_faults, start->major_page_faults),
-           nonnegative_delta(end.voluntary_context_switches,
-                             start->voluntary_context_switches),
-           nonnegative_delta(end.involuntary_context_switches,
-                             start->involuntary_context_switches),
-           bytes_received, bytes_sent);
-  log_debug(message);
+  log_debugf("Request resources: request=\"%s\" wall=%lld.%03lldms "
+             "user_cpu=%lld.%03lldms system_cpu=%lld.%03lldms "
+             "process_peak_rss=%lldKB minor_faults=%lld "
+             "major_faults=%lld voluntary_context_switches=%lld "
+             "involuntary_context_switches=%lld bytes_in=%zu bytes_out=%zu",
+             request, wall_ms, wall_sub_ms, user_ms, user_sub_ms, system_ms,
+             system_sub_ms, end.peak_rss_kb,
+             nonnegative_delta(end.minor_page_faults, start->minor_page_faults),
+             nonnegative_delta(end.major_page_faults, start->major_page_faults),
+             nonnegative_delta(end.voluntary_context_switches,
+                               start->voluntary_context_switches),
+             nonnegative_delta(end.involuntary_context_switches,
+                               start->involuntary_context_switches),
+             bytes_received, bytes_sent);
 }

@@ -1,6 +1,7 @@
 #include "socket.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <stdio.h>
 #include <string.h>
@@ -21,10 +22,8 @@ int server_socket_listen(const char *host, unsigned short port, int backlog) {
 
   int status = getaddrinfo(host, service, &hints, &addresses);
   if (status != 0) {
-    char message[256];
-    snprintf(message, sizeof(message), "Cannot resolve %s:%s: %s",
-             host == NULL ? "*" : host, service, gai_strerror(status));
-    log_error(message);
+    log_errorf("Cannot resolve listen address %s:%s: %s",
+               host == NULL ? "*" : host, service, gai_strerror(status));
     return -1;
   }
 
@@ -44,6 +43,12 @@ int server_socket_listen(const char *host, unsigned short port, int backlog) {
                      sizeof(enabled));
     if (bind(sockfd, address->ai_addr, address->ai_addrlen) == 0 &&
         listen(sockfd, backlog) == 0) {
+      int flags = fcntl(sockfd, F_GETFL, 0);
+      if (flags < 0 || fcntl(sockfd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        last_error = errno;
+        close(sockfd);
+        continue;
+      }
       listener = sockfd;
       break;
     }
@@ -54,10 +59,8 @@ int server_socket_listen(const char *host, unsigned short port, int backlog) {
   freeaddrinfo(addresses);
 
   if (listener < 0) {
-    char message[256];
-    snprintf(message, sizeof(message), "Cannot listen on %s:%s: %s",
-             host == NULL ? "*" : host, service, strerror(last_error));
-    log_error(message);
+    log_errorf("Cannot listen on %s:%s: %s", host == NULL ? "*" : host,
+               service, strerror(last_error));
   }
   return listener;
 }
@@ -75,5 +78,14 @@ int server_socket_accept(int listener, struct sockaddr_storage *peer_address,
     client =
         accept(listener, (struct sockaddr *)peer_address, peer_address_length);
   } while (client < 0 && errno == EINTR);
+  if (client >= 0) {
+    int flags = fcntl(client, F_GETFL, 0);
+    if (flags < 0 || fcntl(client, F_SETFL, flags & ~O_NONBLOCK) < 0) {
+      int saved_error = errno;
+      close(client);
+      errno = saved_error;
+      return -1;
+    }
+  }
   return client;
 }

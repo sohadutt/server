@@ -26,6 +26,8 @@ typedef struct ServerConfig {
   char host[64];
   int worker_threads;
   int tls_enabled;
+  int rate_limiting_enabled;
+  int gzip_enabled;
   char tls_certificate_file[512];
   char tls_private_key_file[512];
 

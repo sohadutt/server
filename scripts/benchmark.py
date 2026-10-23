@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import errno
 import hashlib
 import os
 import secrets
@@ -169,19 +170,27 @@ def percentile(values: list[float], pct: float) -> float:
 class StageStats:
     concurrency: int
     started: float = field(default_factory=time.monotonic)
+    elapsed: float = 0.0
     completed: int = 0
     failed: int = 0
     status_counts: dict[int, int] = field(default_factory=dict)
+    failure_reasons: dict[str, int] = field(default_factory=dict)
     latency_samples: list[float] = field(default_factory=list)
     rss_samples: list[float] = field(default_factory=list)
 
-    def record(self, status: int | None, elapsed: float) -> None:
+    def record(
+        self, status: int | None, elapsed: float, failure_reason: str | None
+    ) -> None:
         if status == 200:
             self.completed += 1
         else:
             self.failed += 1
             if status is not None:
                 self.status_counts[status] = self.status_counts.get(status, 0) + 1
+            reason = failure_reason or (
+                f"http_{status}" if status is not None else "unknown"
+            )
+            self.failure_reasons[reason] = self.failure_reasons.get(reason, 0) + 1
         # Bound client-side memory even during long, high-throughput runs.
         if len(self.latency_samples) < MAX_LATENCY_SAMPLES:
             self.latency_samples.append(elapsed)
@@ -194,9 +203,10 @@ async def request_once(
     token: str | None,
     timeout: float,
     tls_context: ssl.SSLContext | None,
-) -> tuple[int | None, float]:
+) -> tuple[int | None, float, str | None]:
     started = time.monotonic()
     writer: asyncio.StreamWriter | None = None
+    phase = "connect"
     try:
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(
@@ -215,25 +225,35 @@ async def request_once(
         ]
         if token is not None:
             headers.append(f"Authorization: Bearer {token}")
+        phase = "write"
         writer.write(("\r\n".join(headers) + "\r\n\r\n").encode("ascii"))
         await asyncio.wait_for(writer.drain(), timeout=timeout)
+        phase = "response_status"
         status_line = await asyncio.wait_for(reader.readline(), timeout=timeout)
         pieces = status_line.decode("ascii", errors="replace").split()
         if len(pieces) < 2 or not pieces[1].isdigit():
-            return None, time.monotonic() - started
+            return None, time.monotonic() - started, "invalid_status_line"
         status = int(pieces[1])
         # Drain the response so the client measures complete requests.
+        phase = "response_body"
         while await asyncio.wait_for(reader.read(65536), timeout=timeout):
             pass
-        return status, time.monotonic() - started
-    except (OSError, asyncio.TimeoutError, ssl.SSLError):
-        return None, time.monotonic() - started
+        return status, time.monotonic() - started, None
+    except asyncio.TimeoutError:
+        return None, time.monotonic() - started, f"timeout_{phase}"
+    except ssl.SSLError as error:
+        return None, time.monotonic() - started, f"tls_{type(error).__name__}"
+    except OSError as error:
+        error_name = errno.errorcode.get(error.errno, type(error).__name__)
+        return None, time.monotonic() - started, f"{phase}_{error_name}"
+    except asyncio.IncompleteReadError:
+        return None, time.monotonic() - started, f"incomplete_{phase}"
     finally:
         if writer is not None:
             writer.close()
             try:
                 await writer.wait_closed()
-            except OSError:
+            except (OSError, asyncio.TimeoutError):
                 pass
 
 
@@ -266,10 +286,10 @@ async def run_stage(
     async def worker(worker_id: int) -> None:
         token = tokens[worker_id] if tokens else None
         while time.monotonic() < deadline:
-            status, elapsed = await request_once(
+            status, elapsed, failure_reason = await request_once(
                 host, port, path, token, timeout, tls_context
             )
-            stats.record(status, elapsed)
+            stats.record(status, elapsed, failure_reason)
 
     sampler = asyncio.create_task(sample_rss())
     workers = [asyncio.create_task(worker(index)) for index in range(level)]
@@ -278,25 +298,31 @@ async def run_stage(
     finally:
         stop_sampler.set()
         await sampler
+        stats.elapsed = time.monotonic() - stats.started
     return stats
 
 
-def print_stage(stats: StageStats, duration: float) -> tuple[float, float]:
+def print_stage(stats: StageStats) -> tuple[float, float]:
     total = stats.completed + stats.failed
-    rps = total / duration
+    duration = stats.elapsed if stats.elapsed > 0 else 1.0
+    attempted_rps = total / duration
+    successful_rps = stats.completed / duration
     latencies = stats.latency_samples
     p95 = percentile(latencies, 0.95) * 1000
     peak_rss = max(stats.rss_samples, default=0.0)
     avg_rss = statistics.fmean(stats.rss_samples) if stats.rss_samples else 0.0
     print(
-        f"{stats.concurrency:>5} clients | {rps:>9.1f} req/s | "
+        f"{stats.concurrency:>5} clients | {successful_rps:>9.1f} ok/s | "
+        f"{attempted_rps:>9.1f} attempted/s | "
         f"{stats.completed:>8} ok | {stats.failed:>6} failed | "
         f"p50 {percentile(latencies, 0.50) * 1000:>7.1f} ms | "
         f"p95 {p95:>7.1f} ms | RSS avg/peak {avg_rss:.1f}/{peak_rss:.1f} MiB"
     )
     if stats.status_counts:
-        print(f"      HTTP errors: {stats.status_counts}")
-    return rps, p95
+        print(f"      Non-200 HTTP statuses: {stats.status_counts}")
+    if stats.failure_reasons:
+        print(f"      Failure reasons: {stats.failure_reasons}")
+    return successful_rps, p95
 
 
 async def run_benchmark(
@@ -324,7 +350,7 @@ async def run_benchmark(
     )
     if tokens:
         print(f"Temporary authenticated sessions: {len(tokens)}")
-    print("\nConcurrency | Throughput | Successful | Failed | Latency | Server RSS")
+    print("\nConcurrency | Successful/s | Attempted/s | Successful | Failed | Latency | RSS")
 
     total_ok = total_failed = 0
     best_rps = 0.0
@@ -344,7 +370,7 @@ async def run_benchmark(
             tls_context=tls_context,
             pid=pid,
         )
-        rps, p95 = print_stage(stats, args.stage_duration)
+        rps, p95 = print_stage(stats)
         total_ok += stats.completed
         total_failed += stats.failed
         throughput_plateau = (
@@ -371,7 +397,7 @@ async def run_benchmark(
     print(
         f"Requests: {total_ok + total_failed} ({total_ok} successful, {total_failed} failed)"
     )
-    print(f"Best observed throughput: {best_rps:.1f} requests/second")
+    print(f"Best successful throughput: {best_rps:.1f} requests/second")
     print(
         f"First saturation signal: {saturation_level or 'not observed'} concurrent clients"
     )

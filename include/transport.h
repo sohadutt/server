@@ -9,6 +9,9 @@ typedef struct ssl_st SSL;
 typedef struct HttpTransport {
   int socket_fd;
   SSL *tls;
+  int last_status_code;
+  int gzip_enabled;
+  int accepts_gzip;
 } HttpTransport;
 
 ssize_t http_transport_read(HttpTransport *transport, void *buffer,

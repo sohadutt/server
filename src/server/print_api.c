@@ -571,13 +571,13 @@ static int submit_document(FILE *file, const PrintRequestHeaders *headers,
     goto cleanup;
 
   memcpy(printer_name, selected->name, strlen(selected->name) + 1);
-  if (data_print_job_record(data_store, phone_e164, *job_id, selected->name,
-                            media_type, copies, sides,
-                            headers->pages_seen ? headers->pages : "",
-                            headers->batch_id, headers->document_name,
-                            headers->request_id,
-                            stored_job_id) != DATA_OK) {
-    log_error("Print job was accepted by CUPS but could not be saved");
+  DataResult record_result = data_print_job_record(
+      data_store, phone_e164, *job_id, selected->name, media_type, copies,
+      sides, headers->pages_seen ? headers->pages : "", headers->batch_id,
+      headers->document_name, headers->request_id, stored_job_id);
+  if (record_result != DATA_OK) {
+    log_errorf("CUPS job %d was accepted but its database record failed (%d)",
+               *job_id, record_result);
     goto cleanup;
   }
   result = 0;
@@ -891,7 +891,7 @@ size_t print_api_handle(HttpTransport *transport, const HttpRequest *request,
         submit_document(upload, &headers, copies, media_type,
                         user.phone_e164, data_store, printer_name,
                         sizeof(printer_name), &job_id, &stored_job_id) != 0) {
-      log_warn("CUPS could not accept the submitted print document");
+      log_warn("Print submission failed; inspect the request-scoped details");
       failure = "No available printer or CUPS submission failed";
       status = 503;
       reason = "Service Unavailable";
@@ -908,9 +908,8 @@ size_t print_api_handle(HttpTransport *transport, const HttpRequest *request,
     response_bytes = send_job_result(transport, recovered ? 200 : 201,
                                      recovered ? "OK" : "Created", stored_job_id,
                                      job_id, printer_name, headers.batch_id);
-    char message[384];
-    snprintf(message, sizeof(message), "Submitted print job %d", job_id);
-    log_info(message);
+    log_infof("Submitted print job %d to printer '%s' (stored job %lld)",
+              job_id, printer_name, (long long)stored_job_id);
   }
   pthread_mutex_unlock(&print_submission_mutex);
   OPENSSL_cleanse(token, sizeof(token));

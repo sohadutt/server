@@ -4,6 +4,7 @@
 
 #include <arpa/inet.h>
 #include <ctype.h>
+#include <errno.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <openssl/crypto.h>
@@ -15,7 +16,6 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#include "http.h"
 #include "logger.h"
 #include "print_api.h"
 #include "request.h"
@@ -280,12 +280,38 @@ static void log_peer(const struct sockaddr *address, socklen_t address_length) {
   if (address != NULL &&
       getnameinfo(address, address_length, host, sizeof(host), service,
                   sizeof(service), NI_NUMERICHOST | NI_NUMERICSERV) == 0) {
-    char message[256];
-    snprintf(message, sizeof(message), "Connection from %s:%s", host, service);
-    log_info(message);
+    log_debugf("Connection from %s:%s", host, service);
     return;
   }
-  log_info("Connection from unknown source");
+  log_debug("Connection from unknown source");
+}
+
+static void log_request_summary(const HttpRequestLine *request_line,
+                                int status_code, size_t bytes_received,
+                                size_t bytes_sent,
+                                const struct timespec *started) {
+  struct timespec finished;
+  if (clock_gettime(CLOCK_MONOTONIC, &finished) != 0)
+    return;
+  double elapsed_ms = 0.0;
+  if (started != NULL) {
+    elapsed_ms = (double)(finished.tv_sec - started->tv_sec) * 1000.0 +
+                 (double)(finished.tv_nsec - started->tv_nsec) / 1000000.0;
+  }
+  char status_text[16];
+  if (status_code <= 0)
+    snprintf(status_text, sizeof(status_text), "n/a");
+  else
+    snprintf(status_text, sizeof(status_text), "%d", status_code);
+  if (request_line == NULL) {
+    log_debugf("Request completed status=%s bytes_in=%zu bytes_out=%zu duration_ms=%.3f",
+               status_text, bytes_received, bytes_sent, elapsed_ms);
+    return;
+  }
+  size_t path_length = strcspn(request_line->target, "?");
+  log_debugf("Request %s %.*s completed status=%s bytes_in=%zu bytes_out=%zu duration_ms=%.3f",
+             request_line->method, (int)path_length, request_line->target,
+             status_text, bytes_received, bytes_sent, elapsed_ms);
 }
 
 static void close_transport(HttpTransport *transport) {
@@ -303,6 +329,9 @@ void connection_handle(int client, const struct sockaddr *peer_address,
                        const StaticFileServer *static_files,
                        DataStore *data_store, TlsServer *tls_server,
                        const HttpRouter *router) {
+  struct timespec request_started = {0};
+  int have_request_start =
+      clock_gettime(CLOCK_MONOTONIC, &request_started) == 0;
   if (client < 0)
     return;
   if (config == NULL || static_files == NULL || router == NULL) {
@@ -316,22 +345,22 @@ void connection_handle(int client, const struct sockaddr *peer_address,
                  sizeof(receive_timeout)) != 0 ||
       setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &send_timeout,
                  sizeof(send_timeout)) != 0) {
-    log_warn("Could not set client socket timeouts");
+    int socket_error = errno;
+    log_warnf("Could not set client socket timeouts: %s",
+              strerror(socket_error));
     close(client);
     return;
   }
 
   HttpTransport transport = {.socket_fd = client, .tls = NULL};
+  log_peer(peer_address, peer_address_length);
   if (config->tls_enabled) {
     transport.tls = tls_server_accept(tls_server, client);
     if (transport.tls == NULL) {
-      log_debug("TLS handshake failed; closing connection");
       close_transport(&transport);
       return;
     }
   }
-
-  log_peer(peer_address, peer_address_length);
 
   ResourceUsageSnapshot request_start;
   int monitor_request = config->log_level == LOG_DEBUG &&
@@ -339,8 +368,12 @@ void connection_handle(int client, const struct sockaddr *peer_address,
 
   HttpRequest request = {0};
   int read_result = http_request_receive(&transport, &request);
+  transport.gzip_enabled = config->gzip_enabled;
+  transport.accepts_gzip = http_request_accepts_gzip(&request);
   if (read_result < 0) {
-    log_warn("Failed to read request from client");
+    int read_error = errno;
+    log_debugf("Could not read complete request from client: %s",
+               read_error != 0 ? strerror(read_error) : "connection closed");
   } else {
     http_request_log_debug(&request);
   }
@@ -355,9 +388,10 @@ void connection_handle(int client, const struct sockaddr *peer_address,
     char identity[INET6_ADDRSTRLEN] = {0};
     uint64_t now = 0;
     client_identity(peer_address, NULL, identity, sizeof(identity));
-    int may_reply = monotonic_seconds(&now) == 0 &&
-                    rate_limiter_allow(&address_rate_limiter, identity,
-                                       RATE_LIMIT_MALFORMED, now);
+    int may_reply = !config->rate_limiting_enabled ||
+                    (monotonic_seconds(&now) == 0 &&
+                     rate_limiter_allow(&address_rate_limiter, identity,
+                                        RATE_LIMIT_MALFORMED, now));
     size_t bytes_sent = may_reply
                             ? http_response_send(
                                   &transport, 400, "Bad Request",
@@ -369,6 +403,9 @@ void connection_handle(int client, const struct sockaddr *peer_address,
     if (monitor_request)
       resource_monitor_log_request(&request_start, request.data,
                                    request.length, bytes_sent);
+    log_request_summary(request_line_valid ? &request_line : NULL, 400,
+                        request.length, bytes_sent,
+                        have_request_start ? &request_started : NULL);
     close_transport(&transport);
     return;
   }
@@ -385,6 +422,8 @@ void connection_handle(int client, const struct sockaddr *peer_address,
     if (monitor_request)
       resource_monitor_log_request(&request_start, request.data,
                                    request.length, bytes_sent);
+    log_request_summary(&request_line, 405, request.length, bytes_sent,
+                        have_request_start ? &request_started : NULL);
     close_transport(&transport);
     return;
   }
@@ -395,13 +434,14 @@ void connection_handle(int client, const struct sockaddr *peer_address,
     char identity[INET6_ADDRSTRLEN] = {0};
     uint64_t now = 0;
     client_identity(peer_address, &request, identity, sizeof(identity));
-    int rate_limited = monotonic_seconds(&now) != 0 ||
-                       !rate_limit_kind(request_line.target, &limit_kind) ||
-                       !rate_limiter_allow(&address_rate_limiter, identity,
-                                           RATE_LIMIT_API, now) ||
-                       (limit_kind != RATE_LIMIT_API &&
+    int rate_limited = config->rate_limiting_enabled &&
+                       (monotonic_seconds(&now) != 0 ||
+                        !rate_limit_kind(request_line.target, &limit_kind) ||
                         !rate_limiter_allow(&address_rate_limiter, identity,
-                                            limit_kind, now));
+                                            RATE_LIMIT_API, now) ||
+                        (limit_kind != RATE_LIMIT_API &&
+                         !rate_limiter_allow(&address_rate_limiter, identity,
+                                             limit_kind, now)));
     size_t path_length = strcspn(request_line.target, "?");
     int is_print = path_length == sizeof("/api/print") - 1 &&
                    memcmp(request_line.target, "/api/print", path_length) == 0;
@@ -409,7 +449,8 @@ void connection_handle(int client, const struct sockaddr *peer_address,
                    memcmp(request_line.target, "/api/login", path_length) == 0;
     int is_signup = path_length == sizeof("/api/signup") - 1 &&
                     memcmp(request_line.target, "/api/signup", path_length) == 0;
-    if (!rate_limited && !is_login && !is_signup &&
+    if (config->rate_limiting_enabled && !rate_limited && !is_login &&
+        !is_signup &&
         strncmp(request_line.target, "/api/admin/", 11) != 0) {
       char session_key[RATE_LIMITER_KEY_CAPACITY] = {0};
       if (request_session_key(&request, data_store, session_key,
@@ -432,6 +473,8 @@ void connection_handle(int client, const struct sockaddr *peer_address,
           resource_monitor_log_request(&request_start, request.data,
                                        request.length, bytes_sent);
         }
+        log_request_summary(&request_line, 429, request.length, bytes_sent,
+                            have_request_start ? &request_started : NULL);
         close_transport(&transport);
         return;
     }
@@ -444,6 +487,9 @@ void connection_handle(int client, const struct sockaddr *peer_address,
       resource_monitor_log_request(&request_start, request.data,
                                    api_bytes_received, bytes_sent);
     }
+    log_request_summary(&request_line, transport.last_status_code,
+                        api_bytes_received, bytes_sent,
+                        have_request_start ? &request_started : NULL);
     close_transport(&transport);
     return;
   }
@@ -473,11 +519,8 @@ void connection_handle(int client, const struct sockaddr *peer_address,
   }
 
   if (response_file.data != NULL || response_file.is_stream) {
-    char message[512];
-    snprintf(message, sizeof(message), "Serving '%s' as %s (HTTP %d)",
-             response_file.relative_path, response_file.content_type,
-             status_code);
-    log_debug(message);
+    log_debugf("Serving '%s' as %s (HTTP %d)", response_file.relative_path,
+               response_file.content_type, status_code);
   }
 
   const char *content_type = response_file.content_type != NULL
@@ -491,15 +534,20 @@ void connection_handle(int client, const struct sockaddr *peer_address,
                                 response_file.cache_control != NULL
                                     ? response_file.cache_control
                                     : "no-cache")
-                          : http_response_send(
+                          : http_response_send_static(
                                 &transport, status_code, reason_phrase,
                                 content_type, response_file.data,
-                                response_file.length);
+                                response_file.length,
+                                response_file.cache_control != NULL
+                                    ? response_file.cache_control
+                                    : "no-cache");
 
   if (monitor_request) {
     resource_monitor_log_request(&request_start, request.data, request.length,
                                  bytes_sent);
   }
+  log_request_summary(&request_line, status_code, request.length, bytes_sent,
+                      have_request_start ? &request_started : NULL);
   static_file_release(&response_file);
   close_transport(&transport);
 }

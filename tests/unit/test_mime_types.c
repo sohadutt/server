@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 void log_error(const char *message) { (void)message; }
+void log_errorf(const char *format, ...) { (void)format; }
 
 static void write_text_file(const char *path, const char *text) {
   FILE *file = fopen(path, "w");

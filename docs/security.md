@@ -67,8 +67,11 @@ and 30 requests per 60 seconds, and remaining API traffic is capped at 300 per
 client per minute. Malformed HTTP requests get at most 10 error responses per
 client per minute, after which the server silently closes the connection.
 These limits are memory-only, reset on restart,
-and are not shared between server instances; public multi-instance deployments
-should also enforce limits at a trusted edge.
+and are not shared between server instances. The `rate_limiting_enabled`
+configuration option defaults to true; setting it to false disables address,
+session, print, and malformed-request limits. Keep it enabled on network-facing
+deployments, and enforce limits at a trusted edge when running multiple
+instances.
 
 Printed QR codes contain only the internal numeric user ID, not the phone
 number. They are unsigned lookup hints and must never be accepted as proof of
@@ -101,6 +104,10 @@ JSON.
 API responses use `Cache-Control: no-store`. Static HTML uses
 `Cache-Control: no-cache`, ordinary static files use a one-hour public cache,
 and Vite-style hexadecimal hashed filenames use a one-year immutable cache.
+When `gzip_enabled` is true, eligible static responses are gzip-compressed only
+when the client advertises support. Dynamic no-store responses are excluded to
+avoid compressing credential-bearing responses; files over 1 MiB are streamed
+without compression to keep memory bounded.
 Responses include `Content-Security-Policy`, `X-Content-Type-Options: nosniff`,
 `X-Frame-Options: DENY`, same-origin resource policy, a restrictive
 `Permissions-Policy`, and `Referrer-Policy: no-referrer`. The CSP allows

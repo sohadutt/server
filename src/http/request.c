@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <time.h>
@@ -11,6 +12,9 @@
 #include "logger.h"
 
 #define HTTP_REQUEST_TIMEOUT_MS 10000
+
+static size_t skip_line_ending(const HttpRequest *request, size_t position,
+                               size_t limit);
 
 static size_t request_header_length(const HttpRequest *request) {
   for (size_t i = 0; i + 3 < request->length; i++) {
@@ -122,6 +126,119 @@ int http_request_headers_valid(const HttpRequest *request,
   }
 
   return strcmp(http_version, "HTTP/1.1") != 0 || host_count == 1;
+}
+
+int http_request_accepts_gzip(const HttpRequest *request) {
+  if (request == NULL)
+    return 0;
+
+  size_t limit = request_header_length(request);
+  if (limit == 0)
+    return 0;
+
+  size_t position = 0;
+  while (position < limit && request->data[position] != '\r' &&
+         request->data[position] != '\n')
+    position++;
+  position = skip_line_ending(request, position, limit);
+
+  while (position < limit) {
+    size_t end = position;
+    while (end < limit && request->data[end] != '\r' &&
+           request->data[end] != '\n')
+      end++;
+    if (end == position)
+      break;
+
+    size_t colon = position;
+    while (colon < end && request->data[colon] != ':')
+      colon++;
+    if (colon < end && colon - position == sizeof("accept-encoding") - 1 &&
+        strncasecmp(request->data + position, "accept-encoding",
+                    sizeof("accept-encoding") - 1) == 0) {
+      size_t item = colon + 1;
+      while (item < end) {
+        size_t item_end = item;
+        while (item_end < end && request->data[item_end] != ',')
+          item_end++;
+        size_t coding_end = item;
+        while (coding_end < item_end && request->data[coding_end] != ';')
+          coding_end++;
+        while (item < coding_end &&
+               (request->data[item] == ' ' || request->data[item] == '\t'))
+          item++;
+        while (coding_end > item &&
+               (request->data[coding_end - 1] == ' ' ||
+                request->data[coding_end - 1] == '\t'))
+          coding_end--;
+
+        if (coding_end - item == sizeof("gzip") - 1 &&
+            strncasecmp(request->data + item, "gzip", sizeof("gzip") - 1) ==
+                0) {
+          int quality_valid = 1;
+          double quality = 1.0;
+          size_t parameter = coding_end;
+          while (parameter < item_end) {
+            parameter++;
+            while (parameter < item_end &&
+                   (request->data[parameter] == ' ' ||
+                    request->data[parameter] == '\t'))
+              parameter++;
+            size_t parameter_end = parameter;
+            while (parameter_end < item_end &&
+                   request->data[parameter_end] != ';')
+              parameter_end++;
+            size_t value_start = parameter;
+            while (value_start < parameter_end &&
+                   request->data[value_start] != '=')
+              value_start++;
+            if (value_start < parameter_end) {
+              size_t name_end = value_start;
+              while (name_end > parameter &&
+                     (request->data[name_end - 1] == ' ' ||
+                      request->data[name_end - 1] == '\t'))
+                name_end--;
+              value_start++;
+              while (value_start < parameter_end &&
+                     (request->data[value_start] == ' ' ||
+                      request->data[value_start] == '\t'))
+                value_start++;
+              size_t value_end = parameter_end;
+              while (value_end > value_start &&
+                     (request->data[value_end - 1] == ' ' ||
+                      request->data[value_end - 1] == '\t'))
+                value_end--;
+              if (name_end - parameter == 1 &&
+                  (request->data[parameter] == 'q' ||
+                   request->data[parameter] == 'Q')) {
+                char quality_text[16];
+                size_t quality_length = value_end - value_start;
+                if (quality_length == 0 ||
+                    quality_length >= sizeof(quality_text)) {
+                  quality_valid = 0;
+                } else {
+                  memcpy(quality_text, request->data + value_start,
+                         quality_length);
+                  quality_text[quality_length] = '\0';
+                  char *quality_end = NULL;
+                  quality = strtod(quality_text, &quality_end);
+                  if (quality_end == quality_text || *quality_end != '\0' ||
+                      !(quality >= 0.0 && quality <= 1.0))
+                    quality_valid = 0;
+                }
+              }
+            }
+            parameter = parameter_end;
+          }
+          if (quality_valid && quality > 0.0)
+            return 1;
+        }
+        item = item_end + (item_end < end ? 1U : 0U);
+      }
+    }
+    position = skip_line_ending(request, end, limit);
+  }
+  return 0;
 }
 
 static size_t skip_line_ending(const HttpRequest *request, size_t position,
@@ -316,7 +433,8 @@ void http_request_log_debug(const HttpRequest *request) {
     }
     size_t name_length = colon - line_start;
     static const char *const sensitive_headers[] = {
-        "authorization", "proxy-authorization", "cookie", "set-cookie"};
+        "authorization", "proxy-authorization", "cookie", "set-cookie",
+        "x-api-key", "api-key", "x-auth-token"};
     int redact = 0;
     if (!first_line && colon < line_end) {
       for (size_t i = 0;
@@ -330,9 +448,37 @@ void http_request_log_debug(const HttpRequest *request) {
       }
     }
 
+    size_t query_position = line_end;
+    size_t query_end = line_end;
+    if (first_line) {
+      size_t method_end = line_start;
+      while (method_end < line_end && request->data[method_end] != ' ')
+        method_end++;
+      size_t target_end = method_end < line_end ? method_end + 1 : line_end;
+      while (target_end < line_end && request->data[target_end] != ' ')
+        target_end++;
+      for (size_t i = method_end + 1; i < target_end; i++) {
+        if (request->data[i] == '?') {
+          query_position = i;
+          query_end = target_end;
+          break;
+        }
+      }
+    }
+
     size_t content_end = redact ? colon : line_end;
     for (size_t i = line_start; i < content_end && output < sizeof(message) - 1;
          i++) {
+      if (first_line && i == query_position) {
+        static const char redacted_query[] = "?<redacted>";
+        size_t redacted_length = sizeof(redacted_query) - 1;
+        if (redacted_length > sizeof(message) - 1 - output)
+          break;
+        memcpy(message + output, redacted_query, redacted_length);
+        output += redacted_length;
+        i = query_end - 1;
+        continue;
+      }
       unsigned char c = (unsigned char)request->data[i];
       if (c < 0x20 || c == 0x7f) {
         message[output++] = '?';

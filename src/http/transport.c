@@ -1,6 +1,4 @@
 #include "transport.h"
-#include "logger.h"
-
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 
@@ -53,8 +51,7 @@ ssize_t http_transport_read(HttpTransport *transport, void *buffer,
     int ssl_error = SSL_get_error(transport->tls, result);
 
     if (ssl_error == SSL_ERROR_ZERO_RETURN)
-      log_error("zero return ssl error code 6");
-    return 0;
+      return 0;
     if (ssl_error == SSL_ERROR_WANT_READ || ssl_error == SSL_ERROR_WANT_WRITE) {
       short event = ssl_error == SSL_ERROR_WANT_READ ? POLLIN : POLLOUT;
       if (wait_for_ssl_event(transport, event) > 0)

@@ -46,6 +46,11 @@ Configure `log_level`, `log_console`, `log_file`, `log_directory`, and
 foreground session; file logs are useful for service-manager deployments.
 Log files use a date in their filename. Avoid enabling debug logging in a
 public deployment when request payload details could contain private data.
+Log entries include millisecond timestamps and request IDs. At debug level,
+request summaries omit query strings and include status, byte counts, and
+duration; authorization, cookie, and API-key values are redacted. File logs are
+buffered and warning/error messages are flushed immediately. A sudden process
+termination can leave the most recent buffered info/debug entries unwritten.
 
 Check these when investigating an issue:
 

@@ -1,4 +1,5 @@
 #include "data.h"
+#include "logger.h"
 
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
@@ -376,6 +377,9 @@ DataStore *data_store_open(const char *path) {
   return store;
 
 fail:
+  log_errorf("Could not initialize SQLite database '%s': %s", path,
+             store->database != NULL ? sqlite3_errmsg(store->database)
+                                     : "SQLite could not open the database");
   if (store->database != NULL)
     sqlite3_close(store->database);
   pthread_mutex_destroy(&store->mutex);

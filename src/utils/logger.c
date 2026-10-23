@@ -1,6 +1,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <dirent.h>
+#include <inttypes.h>
+#include <stdarg.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
@@ -19,6 +21,10 @@ static char active_log_date[11];
 static pthread_mutex_t logger_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 #define LOG_LINE_CAPACITY 8192
+#define LOG_FILE_BUFFER_CAPACITY (64U * 1024U)
+
+static char log_file_buffer[LOG_FILE_BUFFER_CAPACITY];
+static _Thread_local uint64_t current_request_id;
 
 #ifndef O_CLOEXEC
 #define O_CLOEXEC 0
@@ -147,8 +153,13 @@ static FILE *open_daily_log(const struct tm *date, char date_text[11]) {
   }
 
   FILE *stream = fdopen(log_fd, "a");
-  if (stream == NULL)
+  if (stream == NULL) {
     close(log_fd);
+  } else if (setvbuf(stream, log_file_buffer, _IOFBF,
+                     sizeof(log_file_buffer)) != 0) {
+    fclose(stream);
+    stream = NULL;
+  }
   return stream;
 }
 
@@ -236,48 +247,132 @@ static const char *level_to_string(LogLevel level) {
   }
 }
 
-void log_message(LogLevel level, const char *message) {
+void logger_set_request_id(uint64_t request_id) {
+  current_request_id = request_id;
+}
+
+static void log_vmessage(LogLevel level, const char *format,
+                         va_list arguments)
+    __attribute__((format(printf, 2, 0)));
+
+static void log_vmessage(LogLevel level, const char *format, va_list arguments) {
   pthread_mutex_lock(&logger_mutex);
   if (level < minimum_level)
     goto done;
 
-  if (message == NULL) {
-    message = "(null)";
-  }
-
-  time_t now = time(NULL);
+  struct timespec now;
   struct tm tm_now;
-
-  if (localtime_r(&now, &tm_now) == NULL) {
+  if (clock_gettime(CLOCK_REALTIME, &now) != 0 ||
+      localtime_r(&now.tv_sec, &tm_now) == NULL) {
     goto done;
   }
   rotate_daily_log(&tm_now);
 
   char line[LOG_LINE_CAPACITY];
-  int length = snprintf(
-      line, sizeof(line), "%04d-%02d-%02d %02d:%02d:%02d [%s] %s\n",
+  int prefix_length = snprintf(
+      line, sizeof(line), "%04d-%02d-%02d %02d:%02d:%02d.%03ld [%s]%s",
       tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday, tm_now.tm_hour,
-      tm_now.tm_min, tm_now.tm_sec, level_to_string(level), message);
-  if (length < 0 || (size_t)length >= sizeof(line))
+      tm_now.tm_min, tm_now.tm_sec, now.tv_nsec / 1000000L,
+      level_to_string(level), current_request_id != 0 ? " [request=" : "");
+  if (prefix_length < 0 || (size_t)prefix_length >= sizeof(line))
     goto done;
+  size_t used = (size_t)prefix_length;
+  if (current_request_id != 0) {
+    int request_length = snprintf(line + used, sizeof(line) - used,
+                                  "%" PRIu64 "]", current_request_id);
+    if (request_length < 0 || (size_t)request_length >= sizeof(line) - used)
+      goto done;
+    used += (size_t)request_length;
+  }
+  if (used + 1 >= sizeof(line))
+    goto done;
+  line[used++] = ' ';
+  size_t message_start = used;
+  int message_length = vsnprintf(line + used, sizeof(line) - used - 1,
+                                 format != NULL ? format : "(null)",
+                                 arguments);
+  if (message_length < 0)
+    goto done;
+  if ((size_t)message_length >= sizeof(line) - used - 1) {
+    static const char truncated[] = "... [truncated]\n";
+    size_t marker_length = sizeof(truncated) - 1;
+    size_t marker_position = sizeof(line) - marker_length - 1;
+    memcpy(line + marker_position, truncated, marker_length);
+    used = marker_position + marker_length;
+  } else {
+    used += (size_t)message_length;
+    line[used++] = '\n';
+  }
+  for (size_t index = message_start; index + 1 < used; index++) {
+    unsigned char character = (unsigned char)line[index];
+    if (character < 0x20 || character == 0x7f)
+      line[index] = ' ';
+  }
+  line[used] = '\0';
   if (log_to_console)
     fputs(line, stderr);
   if (log_file != NULL) {
-    fputs(line, log_file);
-    fflush(log_file);
+    errno = 0;
+    int write_failed = fputs(line, log_file) == EOF;
+    if (!write_failed && level >= LOG_WARN && fflush(log_file) != 0)
+      write_failed = 1;
+    if (write_failed) {
+      int write_error = errno;
+      FILE *failed_file = log_file;
+      log_file = NULL;
+      active_log_date[0] = '\0';
+      (void)fclose(failed_file);
+      fprintf(stderr, "Daily log write failed: %s\n",
+              write_error != 0 ? strerror(write_error) : "I/O error");
+    }
   }
 
 done:
   pthread_mutex_unlock(&logger_mutex);
 }
 
+void log_messagef(LogLevel level, const char *format, ...) {
+  va_list arguments;
+  va_start(arguments, format);
+  log_vmessage(level, format, arguments);
+  va_end(arguments);
+}
+
+void log_message(LogLevel level, const char *message) {
+  log_messagef(level, "%s", message != NULL ? message : "(null)");
+}
+
 void log_debug(const char *message) { log_message(LOG_DEBUG, message); }
+void log_debugf(const char *format, ...) {
+  va_list arguments;
+  va_start(arguments, format);
+  log_vmessage(LOG_DEBUG, format, arguments);
+  va_end(arguments);
+}
 
 void log_info(const char *message) { log_message(LOG_INFO, message); }
+void log_infof(const char *format, ...) {
+  va_list arguments;
+  va_start(arguments, format);
+  log_vmessage(LOG_INFO, format, arguments);
+  va_end(arguments);
+}
 
 void log_warn(const char *message) { log_message(LOG_WARN, message); }
+void log_warnf(const char *format, ...) {
+  va_list arguments;
+  va_start(arguments, format);
+  log_vmessage(LOG_WARN, format, arguments);
+  va_end(arguments);
+}
 
 void log_error(const char *message) { log_message(LOG_ERROR, message); }
+void log_errorf(const char *format, ...) {
+  va_list arguments;
+  va_start(arguments, format);
+  log_vmessage(LOG_ERROR, format, arguments);
+  va_end(arguments);
+}
 
 void logger_close(void) {
   pthread_mutex_lock(&logger_mutex);

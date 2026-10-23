@@ -230,9 +230,18 @@ async def request_once(
         await asyncio.wait_for(writer.drain(), timeout=timeout)
         phase = "response_status"
         status_line = await asyncio.wait_for(reader.readline(), timeout=timeout)
+        if not status_line:
+            return None, time.monotonic() - started, "empty_response"
         pieces = status_line.decode("ascii", errors="replace").split()
         if len(pieces) < 2 or not pieces[1].isdigit():
-            return None, time.monotonic() - started, "invalid_status_line"
+            # Include a short escaped sample: it distinguishes an empty close,
+            # a TLS/proxy preamble, and malformed HTTP without dumping a body.
+            sample = repr(status_line[:80])
+            return (
+                None,
+                time.monotonic() - started,
+                f"invalid_status_line:{sample}",
+            )
         status = int(pieces[1])
         # Drain the response so the client measures complete requests.
         phase = "response_body"

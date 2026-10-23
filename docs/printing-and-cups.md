@@ -22,10 +22,10 @@ a printer in the job manifest.
 Use the helper to start and inspect the local CUPS scheduler:
 
 ```sh
-./scripts/setup.sh cups start
-./scripts/setup.sh cups status
-./scripts/setup.sh cups discover
-./scripts/setup.sh cups add-printer
+./scripts/manage.sh cups start
+./scripts/manage.sh cups status
+./scripts/manage.sh cups discover
+./scripts/manage.sh cups add-printer
 ```
 
 The unified setup script supports systemd on Linux and launchd on macOS. It asks for

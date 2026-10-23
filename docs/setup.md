@@ -3,12 +3,12 @@
 Run the interactive menu from the repository root:
 
 ```sh
-./scripts/setup.sh
+./scripts/manage.sh
 ```
 
 The menu offers guided HTTPS setup, config generation, build checks, CUPS
 printer setup, static app publishing, and development certificates. Use
-`./scripts/setup.sh menu` to reopen it explicitly. All actions also have
+`./scripts/manage.sh menu` to reopen it explicitly. All actions also have
 non-interactive command forms.
 
 It checks build dependencies, builds the C server, creates a localhost
@@ -26,14 +26,22 @@ rewritten each time.
 Useful options:
 
 ```sh
-./scripts/setup.sh --help
-./scripts/setup.sh --check
-./scripts/setup.sh --start
-./scripts/setup.sh --with-cups
-./scripts/setup.sh --bind 0.0.0.0 --name printer.example.test --port 8443
-./scripts/setup.sh --force-cert
-./scripts/setup.sh config init build/local-setup/server.conf
+./scripts/manage.sh --help
+./scripts/manage.sh --check
+./scripts/manage.sh --start
+./scripts/manage.sh --with-cups
+./scripts/manage.sh --bind 0.0.0.0 --name printer.example.test --port 8443
+./scripts/manage.sh --force-cert
+./scripts/manage.sh config init build/local-setup/server.conf
 ```
+
+Whenever `manage.sh` starts the server, it raises the soft open-file limit to
+65,536 when the operating system permits and reports the effective and hard
+limits. Set `SERVER_NOFILE_LIMIT` to request a different value. If the hard
+limit is too low, raise it in the host or service manager. Generated systemd
+units request `LimitNOFILE=65536`. The starter config selects an automatic
+worker count based on online CPUs (at least 4, at most 64); set
+`worker_threads = N` in the config to choose a fixed count.
 
 `--check` configures and builds without generating credentials or starting
 services. `--start` launches an existing binary and config without rebuilding;
@@ -46,12 +54,12 @@ for administrator privileges. It does not install operating-system packages
 or add a printer queue. All setup tasks are available through the same script:
 
 ```sh
-./scripts/setup.sh cups start
-./scripts/setup.sh cups status
-./scripts/setup.sh cups discover
-./scripts/setup.sh cups add-printer
-./scripts/setup.sh cert localhost 365
-./scripts/setup.sh static build dashboard /path/to/dashboard https://print.example.com
+./scripts/manage.sh cups start
+./scripts/manage.sh cups status
+./scripts/manage.sh cups discover
+./scripts/manage.sh cups add-printer
+./scripts/manage.sh cert localhost 365
+./scripts/manage.sh static build dashboard /path/to/dashboard https://print.example.com
 ```
 
 `cups add-printer` interactively discovers an IPP printer and creates a

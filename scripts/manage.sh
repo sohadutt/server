@@ -9,16 +9,16 @@ project_dir="$(cd -- "$script_dir/.." && pwd)"
 usage() {
   cat <<'HELP'
 Usage:
-  scripts/setup.sh                     Open the interactive setup menu
-  scripts/setup.sh [run options]       Build, configure, and start local HTTPS
-  scripts/setup.sh menu                Open the interactive setup menu
-  scripts/setup.sh check               Configure and build only
-  scripts/setup.sh config init [path]  Generate a private config from defaults
-  scripts/setup.sh cert [options]      Create a development TLS certificate
-  scripts/setup.sh cups ACTION         Manage CUPS and printer queues
-  scripts/setup.sh server [options]    Build and run a configured server
-  scripts/setup.sh static ACTION       Build and publish Vite/static apps
-  scripts/setup.sh service-unit [config] Generate a systemd user-service unit
+  scripts/manage.sh                     Open the interactive setup menu
+  scripts/manage.sh [run options]       Build, configure, and start local HTTPS
+  scripts/manage.sh menu                Open the interactive setup menu
+  scripts/manage.sh check               Configure and build only
+  scripts/manage.sh config init [path]  Generate a private config from defaults
+  scripts/manage.sh cert [options]      Create a development TLS certificate
+  scripts/manage.sh cups ACTION         Manage CUPS and printer queues
+  scripts/manage.sh server [options]    Build and run a configured server
+  scripts/manage.sh static ACTION       Build and publish Vite/static apps
+  scripts/manage.sh service-unit [config] Generate a systemd user-service unit
 
 Run options:
   --bind ADDRESS  Address to listen on (default: 127.0.0.1)
@@ -29,32 +29,62 @@ Run options:
   --force-cert    Replace an existing development certificate and key
   --check         Configure and build only; do not create secrets or start
   --start         Start an existing build with an existing config; skip build
+  --build         Build the project only; do not create secrets or start
   -h, --help      Show this help
 
 Certificate:
-  setup.sh cert [--force] [hostname-or-ip] [valid-days]
+  manage.sh cert [--force] [hostname-or-ip] [valid-days]
 
 CUPS actions:
-  setup.sh cups start
-  setup.sh cups status
-  setup.sh cups discover
-  setup.sh cups add-printer [queue-name] [printer-uri] [description]
+  manage.sh cups start
+  manage.sh cups status
+  manage.sh cups discover
+  manage.sh cups add-printer [queue-name] [printer-uri] [description]
 
 Server:
-  setup.sh server [config-file]
-  setup.sh server --native-tls [config-file]
-  setup.sh server --tls [config-file]  Use optional local Caddy proxy
+  manage.sh server [config-file]
+  manage.sh server --native-tls [config-file]
+  manage.sh server --tls [config-file]  Use optional local Caddy proxy
 
 Static Vite applications:
-  setup.sh static build NAME SOURCE_DIR [https://your-domain]
-  setup.sh static add NAME DIST_DIR [https://your-domain]
-  setup.sh static list
-  setup.sh static remove NAME
+  manage.sh static build NAME SOURCE_DIR [https://your-domain]
+  manage.sh static add NAME DIST_DIR [https://your-domain]
+  manage.sh static list
+  manage.sh static remove NAME
 
 `build` runs `npm ci` and `npm run build -- --base=/NAME/`, then installs the
 Vite `dist/` output. `add` installs an already-built directory. Both publish
 the app at `/NAME/` and enable SPA route fallback.
 HELP
+}
+
+raise_open_file_limit() {
+  local requested_limit="${SERVER_NOFILE_LIMIT:-65536}"
+  local hard_limit target_limit effective_limit
+
+  if [[ ! "$requested_limit" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'SERVER_NOFILE_LIMIT must be a positive integer (got %q).\n' "$requested_limit" >&2
+    return 2
+  fi
+
+  hard_limit="$(ulimit -Hn)"
+  target_limit="$requested_limit"
+  if [[ "$hard_limit" != unlimited && "$hard_limit" =~ ^[0-9]+$ ]] &&
+     (( target_limit > hard_limit )); then
+    target_limit="$hard_limit"
+  fi
+
+  if ! ulimit -Sn "$target_limit" 2>/dev/null; then
+    printf 'Could not raise the open-file limit to %s; continuing with the current limit.\n' "$target_limit" >&2
+  fi
+
+  effective_limit="$(ulimit -Sn)"
+  printf 'Open-file limit: %s (requested %s; hard limit %s)\n' \
+    "$effective_limit" "$requested_limit" "$hard_limit"
+  if [[ "$effective_limit" =~ ^[0-9]+$ ]] &&
+     (( effective_limit < requested_limit )); then
+    printf 'Raise the OS or service-manager limit to allow more concurrent connections.\n' >&2
+  fi
 }
 
 config_command() {
@@ -67,7 +97,7 @@ config_command() {
         case "$1" in
           --force) force=1; shift ;;
           -h|--help)
-            printf 'Usage: setup.sh config init [path] [--force]\n'
+            printf 'Usage: manage.sh config init [path] [--force]\n'
             return 0
             ;;
           -* ) printf 'Unknown config option: %s\n' "$1" >&2; return 2 ;;
@@ -102,7 +132,7 @@ config_command() {
       printf 'Edit it before starting the server. Keep TLS keys and admin tokens private.\n'
       ;;
     -h|--help|help)
-      printf 'Usage: setup.sh config init [path] [--force]\n'
+      printf 'Usage: manage.sh config init [path] [--force]\n'
       ;;
     *) printf 'Unknown config action: %s\n' "$action" >&2; return 2 ;;
   esac
@@ -128,7 +158,7 @@ make_certificate() {
     return 0
   fi
   if [[ "${1:-}" == --force ]]; then force=1; shift; fi
-  (($# <= 2)) || { printf 'Usage: setup.sh cert [--force] [hostname-or-ip] [valid-days]\n' >&2; return 2; }
+  (($# <= 2)) || { printf 'Usage: manage.sh cert [--force] [hostname-or-ip] [valid-days]\n' >&2; return 2; }
   hostname="${1:-localhost}"
   days="${2:-365}"
   if [[ ! "$days" =~ ^[1-9][0-9]*$ ]] || ((${#days} > 3)) || ((10#$days > 825)); then
@@ -216,7 +246,7 @@ cups_discover() {
 
 cups_add_printer() {
   local queue_name="${1:-}" printer_uri="${2:-}" description="${3:-}" candidate
-  (($# <= 3)) || { printf 'Usage: setup.sh cups add-printer [queue-name] [printer-uri] [description]\n' >&2; return 2; }
+  (($# <= 3)) || { printf 'Usage: manage.sh cups add-printer [queue-name] [printer-uri] [description]\n' >&2; return 2; }
   local command_name
   for command_name in lpinfo lpadmin lpstat awk; do require_command "$command_name" || return; done
   if [[ -z "$printer_uri" ]]; then
@@ -260,7 +290,7 @@ cups_command() {
     status) (($# == 0)) || return 2; cups_status ;;
     discover) (($# == 0)) || return 2; cups_discover ;;
     add-printer) cups_add_printer "$@" ;;
-    -h|--help|help) printf 'Usage: setup.sh cups {start|status|discover|add-printer [queue-name] [printer-uri] [description]}\n' ;;
+    -h|--help|help) printf 'Usage: manage.sh cups {start|status|discover|add-printer [queue-name] [printer-uri] [description]}\n' ;;
     *) printf 'Unknown CUPS action: %s\n' "$action" >&2; return 2 ;;
   esac
 }
@@ -272,15 +302,16 @@ server_command() {
     --tls) mode=proxy; shift ;;
     --native-tls) mode=native; shift ;;
   esac
-  (($# <= 1)) || { printf 'Usage: setup.sh server [--native-tls|--tls] [config-file]\n' >&2; return 2; }
+  (($# <= 1)) || { printf 'Usage: manage.sh server [--native-tls|--tls] [config-file]\n' >&2; return 2; }
   [[ $# -eq 0 ]] || config_file="$1"
   [[ "$config_file" == /* ]] || config_file="$project_dir/$config_file"
   [[ -f "$config_file" ]] || { printf 'Config file not found: %s\n' "$config_file" >&2; return 1; }
   build_project || return
-  if [[ "$mode" == normal ]]; then exec "$project_dir/build/http_server" "$config_file"; fi
+  if [[ "$mode" == normal ]]; then raise_open_file_limit; exec "$project_dir/build/http_server" "$config_file"; fi
   if [[ "$mode" == native ]]; then
     grep -Eq '^[[:space:]]*tls_enabled[[:space:]]*=[[:space:]]*(true|1)[[:space:]]*$' "$config_file" || {
       printf 'Native TLS requires tls_enabled = true (or 1) in %s.\n' "$config_file" >&2; return 2; }
+    raise_open_file_limit
     exec "$project_dir/build/http_server" "$config_file"
   fi
   require_command caddy || { printf 'Install Caddy to use the optional reverse proxy.\n' >&2; return 1; }
@@ -289,7 +320,7 @@ server_command() {
   mkdir -p "$tls_dir"
   {
     cat "$config_file"
-    printf '\n# Generated private TLS backend config.\nhost = 127.0.0.1\nport = 8080\ntls_enabled = true\ntls_certificate_file = %s/certs/server.crt\ntls_private_key_file = %s/certs/server.key\n' "$project_dir" "$project_dir"
+    printf '\n# Generated private TLS backend config.\nhost = 127.0.0.1\nport = 8443\ntls_enabled = true\ntls_certificate_file = %s/certs/server.crt\ntls_private_key_file = %s/certs/server.key\n' "$project_dir" "$project_dir"
   } > "$server_config"
   chmod 600 "$server_config"
   cat > "$caddyfile" <<'CADDY'
@@ -299,13 +330,14 @@ server_command() {
 
 https://localhost:8443 {
   tls internal
-  reverse_proxy https://127.0.0.1:8080 {
+  reverse_proxy https://127.0.0.1:8443 {
     transport http {
       tls_insecure_skip_verify
     }
   }
 }
 CADDY
+  raise_open_file_limit
   "$project_dir/build/http_server" "$server_config" &
   local server_pid=$!
   cleanup_server() { local result=$?; trap - EXIT INT TERM; kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; exit "$result"; }
@@ -318,7 +350,7 @@ CADDY
 }
 
 service_unit_command() {
-  (($# <= 1)) || { printf 'Usage: setup.sh service-unit [config-file]\n' >&2; return 2; }
+  (($# <= 1)) || { printf 'Usage: manage.sh service-unit [config-file]\n' >&2; return 2; }
   local config_file="${1:-config/server.conf}" output_dir output_file
   [[ "$config_file" == /* ]] || config_file="$project_dir/$config_file"
   [[ -f "$config_file" ]] || { printf 'Config file not found: %s\n' "$config_file" >&2; return 1; }
@@ -336,6 +368,7 @@ After=network-online.target cups.service
 Type=simple
 WorkingDirectory=$project_dir
 ExecStart=$project_dir/build/http_server $config_file
+LimitNOFILE=65536
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
@@ -365,7 +398,7 @@ static_command() {
   case "$action" in
     build|add)
       (($# >= 2 && $# <= 3)) || {
-        printf 'Usage: setup.sh static %s NAME %s [https://your-domain]\n' \
+        printf 'Usage: manage.sh static %s NAME %s [https://your-domain]\n' \
           "$action" "$([[ $action == build ]] && printf SOURCE_DIR || printf DIST_DIR)" >&2
         return 2
       }
@@ -461,11 +494,11 @@ static_command() {
       printf 'Restart the server to load a new mount. Run static build again with a later Vite build to replace this deployment.\n'
       ;;
     list)
-      (($# == 0)) || { printf 'Usage: setup.sh static list\n' >&2; return 2; }
+      (($# == 0)) || { printf 'Usage: manage.sh static list\n' >&2; return 2; }
       awk -F'[|=]' '/^[[:space:]]*static_mount[[:space:]]*=/ { path=$2; directory=$3; mode=$4; gsub(/[[:space:]]/, "", path); gsub(/[[:space:]]/, "", directory); gsub(/[[:space:]]/, "", mode); printf "https://<your-domain>%s/ -> public/%s (%s)\n", path, directory, mode }' "$config_file"
       ;;
     remove)
-      (($# == 1)) || { printf 'Usage: setup.sh static remove NAME\n' >&2; return 2; }
+      (($# == 1)) || { printf 'Usage: manage.sh static remove NAME\n' >&2; return 2; }
       local name="$1" app_dir="$apps_dir/${1:-}" config_tmp answer
       static_app_name_valid "$name" || { printf 'Invalid static app name.\n' >&2; return 2; }
       grep -Fq "static_mount = /$name|apps/$name|spa" "$config_file" || {
@@ -484,7 +517,7 @@ static_command() {
       printf 'Removed %s. Restart the server to apply the change.\n' "$name"
       ;;
     -h|--help|help) sed -n '/^Static Vite applications:/,/^$/p' < <(usage) ;;
-    *) printf 'Usage: setup.sh static {build NAME SOURCE_DIR [ORIGIN]|add NAME DIST_DIR [ORIGIN]|list|remove NAME}\n' >&2; return 2 ;;
+    *) printf 'Usage: manage.sh static {build NAME SOURCE_DIR [ORIGIN]|add NAME DIST_DIR [ORIGIN]|list|remove NAME}\n' >&2; return 2 ;;
   esac
 }
 
@@ -579,6 +612,7 @@ run_local() {
       --with-cups) with_cups=1; shift ;;
       --force-cert) force_cert=1; shift ;;
       --check) check_only=1; shift ;;
+      --build) check_only=1; shift ;;
       --start) start_only=1; shift ;;
       -h|--help) usage; return 0 ;;
       *) printf 'Unknown option: %s\n' "$1" >&2; usage >&2; return 2 ;;
@@ -602,15 +636,16 @@ run_local() {
       selected_config="$project_dir/build/local-setup/server.conf"
     fi
     [[ -x "$project_dir/build/http_server" ]] || {
-      printf 'Server binary is missing. Run setup.sh check first.\n' >&2; return 1;
+      printf 'Server binary is missing. Run manage.sh check first.\n' >&2; return 1;
     }
     [[ -f "$selected_config" ]] || {
       printf 'Config file not found: %s\n' "$selected_config" >&2; return 1;
     }
+    raise_open_file_limit
     exec "$project_dir/build/http_server" "$selected_config"
   fi
   [[ -f "$base_config" ]] || {
-    printf 'Base config not found: %s (generate one with setup.sh config init).\n' "$base_config" >&2
+    printf 'Base config not found: %s (generate one with manage.sh config init).\n' "$base_config" >&2
     return 1
   }
   [[ "$port" =~ ^[0-9]{1,5}$ ]] && ((10#$port >= 1 && 10#$port <= 65535)) || {
@@ -664,7 +699,7 @@ run_local() {
     cat "$base_config"
     cat <<CONFIG
 
-# Generated by scripts/setup.sh. Keep this file private.
+# Generated by scripts/manage.sh. Keep this file private.
 host = $bind_address
 port = $port
 tls_enabled = true
@@ -686,6 +721,7 @@ CONFIG
   printf 'Starting HTTPS at https://%s:%s/\n' "$certificate_name" "$port"
   printf 'Admin credential is stored in %s (mode 0600).\n' "$admin_token_file"
   printf 'This development certificate must be trusted by your browser/device.\n'
+  raise_open_file_limit
   exec "$project_dir/build/http_server" "$runtime_config"
 }
 

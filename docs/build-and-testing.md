@@ -20,7 +20,7 @@ Use the guided CLI setup to create a development certificate and start the
 TLS-enabled server:
 
 ```sh
-./scripts/setup.sh
+./scripts/manage.sh
 ```
 
 For a manually configured server, pass a config file to the binary:
@@ -81,19 +81,19 @@ The unified setup script can build and start the server using
 `config/server.conf`:
 
 ```sh
-./scripts/setup.sh server
+./scripts/manage.sh server
 ```
 
 Pass a config file to use another configuration:
 
 ```sh
-./scripts/setup.sh server path/to/server.conf
+./scripts/manage.sh server path/to/server.conf
 ```
 
 On Linux, create a systemd user-service unit with:
 
 ```sh
-./scripts/setup.sh service-unit path/to/server.conf
+./scripts/manage.sh service-unit path/to/server.conf
 ```
 
 Review the generated writable paths before enabling the unit; see the
@@ -106,7 +106,7 @@ Native HTTPS is built into the C server. Generate a self-signed certificate for
 local development:
 
 ```sh
-./scripts/setup.sh cert localhost 365
+./scripts/manage.sh cert localhost 365
 ```
 
 Set these values in `config/server.conf` (certificate paths are relative to the
@@ -122,7 +122,7 @@ port = 8443
 Then start the native TLS listener:
 
 ```sh
-./scripts/setup.sh server --native-tls
+./scripts/manage.sh server --native-tls
 ```
 
 When TLS is enabled, the listener accepts HTTPS only. Browsers will warn about
@@ -134,7 +134,7 @@ For local HTTPS through an optional reverse proxy, install
 [Caddy](https://caddyserver.com/docs/install) and run:
 
 ```sh
-./scripts/setup.sh server --tls
+./scripts/manage.sh server --tls
 ```
 
 This starts Caddy at `https://localhost:8443` with its [internal local
@@ -149,6 +149,6 @@ host, use a real DNS name, allow Caddy to obtain a public certificate, and
 reverse proxy to the server on a loopback-only address. Do not expose the
 plain HTTP backend directly.
 
-`scripts/setup.sh cert` creates a P-256 self-signed development certificate
+`scripts/manage.sh cert` creates a P-256 self-signed development certificate
 with a Subject Alternative Name. Existing files are preserved by default;
 pass `--force` to replace them.

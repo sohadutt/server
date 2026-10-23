@@ -15,10 +15,10 @@ itself.
 From the repository root:
 
 ```sh
-./scripts/setup.sh cups start
-./scripts/setup.sh cups status
-./scripts/setup.sh cups discover
-./scripts/setup.sh cups add-printer
+./scripts/manage.sh cups start
+./scripts/manage.sh cups status
+./scripts/manage.sh cups discover
+./scripts/manage.sh cups add-printer
 ```
 
 Starting CUPS may ask for administrator privileges. Discovery lists IPP

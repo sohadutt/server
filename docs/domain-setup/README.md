@@ -45,8 +45,8 @@ From the repository root, create the backend certificate for the same hostname
 and start the app on loopback:
 
 ```sh
-./scripts/setup.sh cert print.example.com 365
-./scripts/setup.sh --bind 127.0.0.1 --name print.example.com --port 8443
+./scripts/manage.sh cert print.example.com 365
+./scripts/manage.sh --bind 127.0.0.1 --name print.example.com --port 8443
 ```
 
 The certificate is self-signed and is used only between Caddy and the local C
@@ -69,6 +69,7 @@ Type=simple
 User=YOUR_SERVICE_USER
 WorkingDirectory=/path/to/server
 ExecStart=/path/to/server/build/http_server /path/to/server/build/local-setup/server.conf
+LimitNOFILE=65536
 Restart=on-failure
 NoNewPrivileges=true
 PrivateTmp=true
@@ -84,7 +85,7 @@ Make sure the service user can write the configured database and log paths.
 
 If `certs/server.crt` and `certs/server.key` already exist for another
 hostname, the `cert` command will preserve them and stop. To rotate them, run
-`./scripts/setup.sh cert --force print.example.com 365` while the server is
+`./scripts/manage.sh cert --force print.example.com 365` while the server is
 stopped, then start the server again. The private key is replaced as part of
 that operation.
 
@@ -150,7 +151,7 @@ lists common causes.
 Mounted Vite and static applications use paths on the same domain, for example
 `https://print.example.com/dashboard/`. The Caddy site block above already
 proxies all paths to the C server; add the application mount with
-[`setup.sh static`](../static-deployment.md), then restart the C server.
+[`manage.sh static`](../static-deployment.md), then restart the C server.
 
 ## Important deployment notes
 
@@ -160,6 +161,6 @@ proxies all paths to the C server; add the application mount with
 - Use a stable public IP or keep DNS updated when the public address changes.
 - A domain name only points traffic to the server; it does not provide hosting,
   a public IP, firewall rules, or an email service.
-- The generated `setup.sh` runtime config is for this deployment flow. Review
+- The generated `manage.sh` runtime config is for this deployment flow. Review
   [site security](../security.md) and [TLS behavior](../tls.md) before exposing
   the service to the internet.

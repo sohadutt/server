@@ -10,8 +10,8 @@ Install those requirements using your operating system's package manager, then
 run these commands from the repository root:
 
 ```sh
-./scripts/setup.sh --check
-./scripts/setup.sh
+./scripts/manage.sh --check
+./scripts/manage.sh
 ```
 
 The first command configures and builds the project.
@@ -33,7 +33,7 @@ The print page sends account and document requests to the same server over
 HTTPS.
 
 To stop the foreground server, press **Ctrl-C** in the terminal running
-`setup.sh`.
+`manage.sh`.
 
 ## Add a printer
 
@@ -41,10 +41,10 @@ The server submits print jobs through CUPS. Start and inspect CUPS, then add a
 queue if necessary:
 
 ```sh
-./scripts/setup.sh cups start
-./scripts/setup.sh cups status
-./scripts/setup.sh cups discover
-./scripts/setup.sh cups add-printer
+./scripts/manage.sh cups start
+./scripts/manage.sh cups status
+./scripts/manage.sh cups discover
+./scripts/manage.sh cups add-printer
 ```
 
 Printer discovery may show devices that are not yet configured as queues. The

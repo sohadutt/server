@@ -72,6 +72,8 @@ static size_t send_headers(HttpTransport *transport, int status_code,
 #endif
 
   ByteBuffer headers;
+  if (byte_buffer_init(&headers, 8192) != 0)
+    return 0;
   if (byte_buffer_appendf(
           &headers,
           "HTTP/1.1 %d %s\r\n"

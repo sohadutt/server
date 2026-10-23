@@ -25,7 +25,7 @@ headers. HSTS is sent only over HTTPS.
 Generate a local development certificate with:
 
 ```sh
-./scripts/setup.sh cert localhost 365
+./scripts/manage.sh cert localhost 365
 ```
 
 The helper creates an ECDSA P-256 key and a self-signed certificate with a

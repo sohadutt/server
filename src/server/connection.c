@@ -314,6 +314,18 @@ static void log_request_summary(const HttpRequestLine *request_line,
              status_text, bytes_received, bytes_sent, elapsed_ms);
 }
 
+static void drain_rejected_body(HttpTransport *transport,
+                                const HttpRequest *request, int headers_valid,
+                                size_t *bytes_received) {
+  if (!headers_valid)
+    return;
+  errno = 0;
+  if (http_request_drain_body(transport, request, bytes_received) != 0 &&
+      errno != EMSGSIZE)
+    log_debugf("Could not drain rejected request body: %s",
+               errno != 0 ? strerror(errno) : "incomplete body");
+}
+
 static void close_transport(HttpTransport *transport) {
   if (transport == NULL)
     return;
@@ -381,9 +393,9 @@ void connection_handle(int client, const struct sockaddr *peer_address,
   HttpRequestLine request_line = {0};
   int request_line_valid =
       read_result > 0 && http_request_line_parse(&request, &request_line) == 0;
-  int request_valid = request_line_valid &&
-                      http_request_headers_valid(&request,
-                                                 request_line.version);
+  int headers_valid = request_line_valid &&
+                      http_request_headers_valid(&request, request_line.version);
+  int request_valid = request_line_valid && headers_valid;
   if (!request_valid) {
     char identity[INET6_ADDRSTRLEN] = {0};
     uint64_t now = 0;
@@ -398,13 +410,16 @@ void connection_handle(int client, const struct sockaddr *peer_address,
                                   "text/plain; charset=utf-8",
                                   "Bad Request\n", sizeof("Bad Request\n") - 1)
                             : 0;
+    size_t bytes_received = request.length;
+    drain_rejected_body(&transport, &request, headers_valid,
+                        &bytes_received);
     log_debug(may_reply ? "Rejected malformed HTTP request"
                         : "Dropped malformed request from throttled client");
     if (monitor_request)
       resource_monitor_log_request(&request_start, request.data,
-                                   request.length, bytes_sent);
+                                   bytes_received, bytes_sent);
     log_request_summary(request_line_valid ? &request_line : NULL, 400,
-                        request.length, bytes_sent,
+                        bytes_received, bytes_sent,
                         have_request_start ? &request_started : NULL);
     close_transport(&transport);
     return;
@@ -419,10 +434,13 @@ void connection_handle(int client, const struct sockaddr *peer_address,
     size_t bytes_sent = http_response_send(
         &transport, 405, "Method Not Allowed", "text/plain; charset=utf-8",
         "Method Not Allowed\n", sizeof("Method Not Allowed\n") - 1);
+    size_t bytes_received = request.length;
+    drain_rejected_body(&transport, &request, headers_valid,
+                        &bytes_received);
     if (monitor_request)
       resource_monitor_log_request(&request_start, request.data,
-                                   request.length, bytes_sent);
-    log_request_summary(&request_line, 405, request.length, bytes_sent,
+                                   bytes_received, bytes_sent);
+    log_request_summary(&request_line, 405, bytes_received, bytes_sent,
                         have_request_start ? &request_started : NULL);
     close_transport(&transport);
     return;
@@ -469,11 +487,14 @@ void connection_handle(int client, const struct sockaddr *peer_address,
         size_t bytes_sent = http_response_send(
             &transport, 429, "Too Many Requests", "application/json",
             response, sizeof(response) - 1);
+        size_t bytes_received = request.length;
+        drain_rejected_body(&transport, &request, headers_valid,
+                            &bytes_received);
         if (monitor_request) {
           resource_monitor_log_request(&request_start, request.data,
-                                       request.length, bytes_sent);
+                                       bytes_received, bytes_sent);
         }
-        log_request_summary(&request_line, 429, request.length, bytes_sent,
+        log_request_summary(&request_line, 429, bytes_received, bytes_sent,
                             have_request_start ? &request_started : NULL);
         close_transport(&transport);
         return;
@@ -483,6 +504,8 @@ void connection_handle(int client, const struct sockaddr *peer_address,
     (void)api_handle_request(&transport, &request, request_line.method,
                              request_line.target, config, data_store,
                              &api_bytes_received, &bytes_sent);
+    drain_rejected_body(&transport, &request, headers_valid,
+                        &api_bytes_received);
     if (monitor_request) {
       resource_monitor_log_request(&request_start, request.data,
                                    api_bytes_received, bytes_sent);
@@ -542,11 +565,14 @@ void connection_handle(int client, const struct sockaddr *peer_address,
                                     ? response_file.cache_control
                                     : "no-cache");
 
+  size_t bytes_received = request.length;
+  drain_rejected_body(&transport, &request, headers_valid, &bytes_received);
+
   if (monitor_request) {
-    resource_monitor_log_request(&request_start, request.data, request.length,
+    resource_monitor_log_request(&request_start, request.data, bytes_received,
                                  bytes_sent);
   }
-  log_request_summary(&request_line, status_code, request.length, bytes_sent,
+  log_request_summary(&request_line, status_code, bytes_received, bytes_sent,
                       have_request_start ? &request_started : NULL);
   static_file_release(&response_file);
   close_transport(&transport);

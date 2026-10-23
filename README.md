@@ -10,13 +10,13 @@ and stores accounts, sessions, and credit ledger entries in SQLite.
 cmake -S . -B build
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
-./scripts/setup.sh
+./scripts/manage.sh
 ```
 
 Requirements, test details, and setup/TLS steps are in the
 [build and testing guide](docs/build-and-testing.md).
 
-Run `./scripts/setup.sh` for an interactive setup menu, or use its subcommands
+Run `./scripts/manage.sh` for an interactive setup menu, or use its subcommands
 for scripted setup. The guided local HTTPS flow generates a private runtime
 config and development TLS credentials. See the [setup guide](docs/setup.md)
 for CLI options, LAN access, and CUPS setup.

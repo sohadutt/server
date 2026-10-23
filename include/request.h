@@ -28,6 +28,9 @@ int http_request_headers_valid(const HttpRequest *request,
 int http_request_accepts_gzip(const HttpRequest *request);
 /* True when the request has valid headers and no unsupported body framing. */
 int http_request_is_bodyless(const HttpRequest *request);
+/* Drain a small, framed request body before closing a rejected connection. */
+int http_request_drain_body(HttpTransport *transport, const HttpRequest *request,
+                            size_t *bytes_received);
 void http_request_log_debug(const HttpRequest *request);
 int http_request_line_parse(const HttpRequest *request,
                             HttpRequestLine *request_line);

@@ -17,7 +17,7 @@ int main(void) {
   ServerConfig config;
   config_defaults(&config);
   assert(config.port == 8080);
-  assert(config.worker_threads == 4);
+  assert(config.worker_threads >= 1 && config.worker_threads <= 64);
   assert(config.signup_enabled == 0);
 
   char path[] = "/tmp/server-config-test-XXXXXX";

@@ -10,7 +10,7 @@ Run this from the server repository. The source directory must have a
 `package-lock.json` (or `npm-shrinkwrap.json`) and a Vite `build` script.
 
 ```sh
-./scripts/setup.sh static build dashboard /path/to/dashboard https://print.example.com
+./scripts/manage.sh static build dashboard /path/to/dashboard https://print.example.com
 ```
 
 The command runs `npm ci`, builds with Vite base `/dashboard/`, copies `dist/`
@@ -32,7 +32,7 @@ cd /path/to/dashboard
 npm ci
 npm run build -- --base=/dashboard/
 cd /path/to/server
-./scripts/setup.sh static add dashboard /path/to/dashboard/dist https://print.example.com
+./scripts/manage.sh static add dashboard /path/to/dashboard/dist https://print.example.com
 ```
 
 The server's default MIME table includes JavaScript modules, CSS, JSON,
@@ -42,9 +42,9 @@ WebAssembly, SVG, common images, and web fonts. Add a mapping to
 ## Manage deployments
 
 ```sh
-./scripts/setup.sh static list
-./scripts/setup.sh static build dashboard /path/to/dashboard https://print.example.com
-./scripts/setup.sh static remove dashboard
+./scripts/manage.sh static list
+./scripts/manage.sh static build dashboard /path/to/dashboard https://print.example.com
+./scripts/manage.sh static remove dashboard
 ```
 
 `remove` asks before deleting the mount and its deployed files. The static

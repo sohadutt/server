@@ -12,6 +12,7 @@
 #include "logger.h"
 
 #define HTTP_REQUEST_TIMEOUT_MS 10000
+#define HTTP_REQUEST_DRAIN_LIMIT (64U * 1024U)
 
 static size_t skip_line_ending(const HttpRequest *request, size_t position,
                                size_t limit);
@@ -401,6 +402,111 @@ int http_request_receive(HttpTransport *transport, HttpRequest *request) {
   }
 
   return 1;
+}
+
+int http_request_drain_body(HttpTransport *transport, const HttpRequest *request,
+                            size_t *bytes_received) {
+  if (transport == NULL || request == NULL || transport->socket_fd < 0)
+    return -1;
+
+  size_t end = request_header_length(request);
+  if (end == 0)
+    return -1;
+
+  size_t content_length = 0;
+  int length_seen = 0;
+  size_t position = 0;
+  while (position < end && request->data[position] != '\n')
+    position++;
+  if (position < end)
+    position++;
+  while (position < end) {
+    size_t line_end = position;
+    while (line_end < end && request->data[line_end] != '\r' &&
+           request->data[line_end] != '\n')
+      line_end++;
+    if (line_end == position)
+      break;
+    size_t colon = position;
+    while (colon < line_end && request->data[colon] != ':')
+      colon++;
+    if (colon == line_end)
+      return -1;
+    if (colon - position == sizeof("content-length") - 1 &&
+        strncasecmp(request->data + position, "content-length",
+                    sizeof("content-length") - 1) == 0) {
+      if (length_seen)
+        return -1;
+      length_seen = 1;
+      size_t value = colon + 1;
+      while (value < line_end &&
+             (request->data[value] == ' ' || request->data[value] == '\t'))
+        value++;
+      size_t value_end = line_end;
+      while (value_end > value &&
+             (request->data[value_end - 1] == ' ' ||
+              request->data[value_end - 1] == '\t'))
+        value_end--;
+      if (value == value_end)
+        return -1;
+      for (size_t index = value; index < value_end; index++) {
+        unsigned char character = (unsigned char)request->data[index];
+        if (character < '0' || character > '9' ||
+            content_length > (HTTP_REQUEST_DRAIN_LIMIT -
+                              (size_t)(character - '0')) /
+                                 10U) {
+          errno = EMSGSIZE;
+          return -1;
+        }
+        content_length = content_length * 10U + (size_t)(character - '0');
+      }
+    }
+    while (line_end < end && (request->data[line_end] == '\r' ||
+                              request->data[line_end] == '\n'))
+      line_end++;
+    position = line_end;
+  }
+
+  size_t received_total = request->length;
+  if (bytes_received != NULL && *bytes_received > received_total)
+    received_total = *bytes_received;
+  size_t received_body = received_total > end ? received_total - end : 0;
+  if (received_body > content_length)
+    return -1;
+  size_t remaining = content_length - received_body;
+  unsigned char discard[1024];
+  struct timespec deadline;
+  if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
+    return -1;
+  deadline.tv_nsec += 250000000L;
+  if (deadline.tv_nsec >= 1000000000L) {
+    deadline.tv_sec++;
+    deadline.tv_nsec -= 1000000000L;
+  }
+  while (remaining > 0) {
+    int timeout_ms = remaining_timeout_ms(&deadline);
+    if (timeout_ms <= 0) {
+      if (timeout_ms == 0)
+        errno = ETIMEDOUT;
+      return -1;
+    }
+    int ready = http_transport_wait_readable(transport, timeout_ms);
+    if (ready <= 0) {
+      if (ready == 0)
+        errno = ETIMEDOUT;
+      return -1;
+    }
+    size_t chunk = remaining < sizeof(discard) ? remaining : sizeof(discard);
+    ssize_t count = http_transport_read(transport, discard, chunk);
+    if (count < 0 && errno == EINTR)
+      continue;
+    if (count <= 0)
+      return -1;
+    remaining -= (size_t)count;
+  }
+  if (bytes_received != NULL)
+    *bytes_received = end + content_length;
+  return 0;
 }
 
 void http_request_log_debug(const HttpRequest *request) {

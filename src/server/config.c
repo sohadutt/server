@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "config.h"
 
@@ -76,6 +77,15 @@ static int parse_bool(const char *value, int *result) {
   return -1;
 }
 
+static int automatic_worker_count(void) {
+  long processor_count = sysconf(_SC_NPROCESSORS_ONLN);
+  if (processor_count < 2)
+    return 4;
+  if (processor_count >= 32)
+    return 64;
+  return (int)(processor_count * 2);
+}
+
 static int set_value(ServerConfig *config, const char *key, const char *value) {
   if (strcmp(key, "static_mount") == 0) {
     if (config->static_mount_count >= SERVER_STATIC_MOUNTS_MAX)
@@ -127,6 +137,10 @@ static int set_value(ServerConfig *config, const char *key, const char *value) {
     return copy_value(config->host, sizeof(config->host), value);
   }
   if (strcmp(key, "worker_threads") == 0) {
+    if (strcmp(value, "auto") == 0) {
+      config->worker_threads = automatic_worker_count();
+      return 0;
+    }
     return parse_int(value, 1, 64, &config->worker_threads);
   }
   if (strcmp(key, "rate_limiting_enabled") == 0 ||
@@ -216,7 +230,7 @@ void config_defaults(ServerConfig *config) {
   config->log_file = 1;
   config->log_retention_days = 30;
   config->port = 8080;
-  config->worker_threads = 4;
+  config->worker_threads = automatic_worker_count();
   config->rate_limiting_enabled = 1;
   config->gzip_enabled = 1;
   snprintf(config->host, sizeof(config->host), "%s", "0.0.0.0");

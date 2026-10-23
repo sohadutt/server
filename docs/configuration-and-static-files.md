@@ -11,7 +11,7 @@ to the process working directory unless they are absolute paths.
 | --- | --- | --- |
 | `host` | `0.0.0.0` | Host name or IP address |
 | `port` | `8080` | `1`–`65535` |
-| `worker_threads` | `4` | `1`–`64` |
+| `worker_threads` | `auto` (at least `4`, up to twice online CPU count, capped at `64`) | `auto`, `1`–`64` |
 | `rate_limiting_enabled` (`throttling` alias) | `true` | `true`, `false`, `1`, `0` |
 | `gzip_enabled` | `true` | `true`, `false`, `1`, `0` |
 | `tls_enabled` | `false` | `true`, `false`, `1`, `0` |

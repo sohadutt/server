@@ -171,6 +171,8 @@ class ServerIntegrationTests(unittest.TestCase):
                 # OpenSSL on macOS may report the peer's immediate close as a
                 # reset after urllib has already received the status and headers.
                 body = b""
+            finally:
+                error.close()
             return error.code, dict(error.headers), body
 
     def setUp(self) -> None:

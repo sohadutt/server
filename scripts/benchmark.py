@@ -177,6 +177,19 @@ class StageStats:
     failure_reasons: dict[str, int] = field(default_factory=dict)
     latency_samples: list[float] = field(default_factory=list)
     rss_samples: list[float] = field(default_factory=list)
+    active_requests: int = 0
+    peak_active_requests: int = 0
+    open_connections: int = 0
+    peak_open_connections: int = 0
+
+    def connection_opened(self) -> None:
+        self.open_connections += 1
+        self.peak_open_connections = max(
+            self.peak_open_connections, self.open_connections
+        )
+
+    def connection_closed(self) -> None:
+        self.open_connections = max(0, self.open_connections - 1)
 
     def record(
         self, status: int | None, elapsed: float, failure_reason: str | None
@@ -203,6 +216,7 @@ async def request_once(
     token: str | None,
     timeout: float,
     tls_context: ssl.SSLContext | None,
+    stats: StageStats | None = None,
 ) -> tuple[int | None, float, str | None]:
     started = time.monotonic()
     writer: asyncio.StreamWriter | None = None
@@ -217,6 +231,8 @@ async def request_once(
             ),
             timeout=timeout,
         )
+        if stats is not None:
+            stats.connection_opened()
         headers = [
             f"GET {path} HTTP/1.1",
             f"Host: {host}",
@@ -264,6 +280,11 @@ async def request_once(
                 await writer.wait_closed()
             except (OSError, asyncio.TimeoutError):
                 pass
+            # Let the selector retire this transport before a rapid reconnect
+            # reuses its file descriptor (notably on recent macOS/Python builds).
+            await asyncio.sleep(0)
+            if stats is not None:
+                stats.connection_closed()
 
 
 class PersistentHTTPClient:
@@ -272,6 +293,7 @@ class PersistentHTTPClient:
     def __init__(
         self, host: str, port: int, path: str, token: str | None,
         timeout: float, tls_context: ssl.SSLContext | None,
+        stats: StageStats,
     ) -> None:
         self.host = host
         self.port = port
@@ -279,6 +301,7 @@ class PersistentHTTPClient:
         self.token = token
         self.timeout = timeout
         self.tls_context = tls_context
+        self.stats = stats
         self.reader: asyncio.StreamReader | None = None
         self.writer: asyncio.StreamWriter | None = None
 
@@ -291,6 +314,8 @@ class PersistentHTTPClient:
                 await writer.wait_closed()
             except (OSError, asyncio.TimeoutError):
                 pass
+            await asyncio.sleep(0)
+            self.stats.connection_closed()
 
     async def request(self) -> tuple[int | None, float, str | None]:
         started = time.monotonic()
@@ -304,6 +329,7 @@ class PersistentHTTPClient:
                     ),
                     timeout=self.timeout,
                 )
+                self.stats.connection_opened()
             headers = [
                 f"GET {self.path} HTTP/1.1",
                 f"Host: {self.host}",
@@ -381,7 +407,8 @@ async def run_stage(
     connection_mode: str,
 ) -> StageStats:
     stats = StageStats(concurrency=level)
-    deadline = time.monotonic() + duration
+    start_workers = asyncio.Event()
+    deadline = 0.0
     stop_sampler = asyncio.Event()
 
     async def sample_rss() -> None:
@@ -397,18 +424,26 @@ async def run_stage(
     async def worker(worker_id: int) -> None:
         token = tokens[worker_id] if tokens else None
         persistent_client = (
-            PersistentHTTPClient(host, port, path, token, timeout, tls_context)
+            PersistentHTTPClient(host, port, path, token, timeout, tls_context, stats)
             if connection_mode == "keep-alive"
             else None
         )
         try:
+            await start_workers.wait()
             while time.monotonic() < deadline:
-                if persistent_client is not None:
-                    result = await persistent_client.request()
-                else:
-                    result = await request_once(
-                        host, port, path, token, timeout, tls_context
-                    )
+                stats.active_requests += 1
+                stats.peak_active_requests = max(
+                    stats.peak_active_requests, stats.active_requests
+                )
+                try:
+                    if persistent_client is not None:
+                        result = await persistent_client.request()
+                    else:
+                        result = await request_once(
+                            host, port, path, token, timeout, tls_context, stats
+                        )
+                finally:
+                    stats.active_requests -= 1
                 stats.record(*result)
         finally:
             if persistent_client is not None:
@@ -417,6 +452,9 @@ async def run_stage(
     sampler = asyncio.create_task(sample_rss())
     workers = [asyncio.create_task(worker(index)) for index in range(level)]
     try:
+        stats.started = time.monotonic()
+        deadline = stats.started + duration
+        start_workers.set()
         await asyncio.gather(*workers)
     finally:
         stop_sampler.set()
@@ -441,6 +479,11 @@ def print_stage(stats: StageStats) -> tuple[float, float]:
         f"p50 {percentile(latencies, 0.50) * 1000:>7.1f} ms | "
         f"p95 {p95:>7.1f} ms | RSS avg/peak {avg_rss:.1f}/{peak_rss:.1f} MiB"
     )
+    print(
+        f"      Client workers: {stats.concurrency}; peak active requests: "
+        f"{stats.peak_active_requests}; peak established connections: "
+        f"{stats.peak_open_connections}"
+    )
     if stats.status_counts:
         print(f"      Non-200 HTTP statuses: {stats.status_counts}")
     if stats.failure_reasons:
@@ -462,6 +505,21 @@ async def run_benchmark(
     if not path.startswith("/") or "\r" in path or "\n" in path:
         raise ValueError("--path must start with / and contain no line breaks")
 
+    probe_status, _, probe_error = await request_once(
+        host,
+        port,
+        path,
+        tokens[0] if tokens else None,
+        args.timeout,
+        tls_context,
+    )
+    if probe_status != 200:
+        detail = probe_error or f"HTTP {probe_status}"
+        raise ValueError(
+            f"preflight request to {path} did not return HTTP 200 ({detail}); "
+            "choose a valid static path or a successful API endpoint"
+        )
+
     baseline = read_rss_mib(pid)
     if baseline is None:
         raise ValueError(f"could not read RSS for PID {pid}")
@@ -472,6 +530,13 @@ async def run_benchmark(
         f"Load: {levels[0]} to {levels[-1]} concurrent clients, {args.stage_duration:g}s per stage"
     )
     print(f"Connection mode: {args.connection_mode}")
+    print(
+        "Latency covers each request coroutine from connect (when needed) "
+        "through the complete response body; it excludes time between requests. "
+        "The benchmark launches exactly the configured number of sequential "
+        "client worker tasks; established sockets may be fewer while "
+        "connects/TLS handshakes are in progress."
+    )
     if tokens:
         print(f"Temporary authenticated sessions: {len(tokens)}")
     print("\nConcurrency | Successful/s | Attempted/s | Successful | Failed | Latency | RSS")

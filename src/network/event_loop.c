@@ -12,7 +12,6 @@ typedef struct EventWatch {
 
 struct EventLoop {
   size_t count;
-  int dispatching;
   EventWatch watches[EVENT_LOOP_MAX_WATCHES];
 };
 
@@ -25,10 +24,6 @@ int event_loop_add(EventLoop *loop, int file_descriptor, short events,
   if (loop == NULL || file_descriptor < 0 || events == 0 || callback == NULL ||
       loop->count >= EVENT_LOOP_MAX_WATCHES) {
     errno = EINVAL;
-    return -1;
-  }
-  if (loop->dispatching) {
-    errno = EBUSY;
     return -1;
   }
   for (size_t index = 0; index < loop->count; index++) {
@@ -51,10 +46,6 @@ int event_loop_remove(EventLoop *loop, int file_descriptor) {
     errno = EINVAL;
     return -1;
   }
-  if (loop->dispatching) {
-    errno = EBUSY;
-    return -1;
-  }
   for (size_t index = 0; index < loop->count; index++) {
     if (loop->watches[index].file_descriptor == file_descriptor) {
       loop->count--;
@@ -73,16 +64,19 @@ int event_loop_run_once(EventLoop *loop, int timeout_milliseconds) {
     return -1;
   }
   struct pollfd descriptors[EVENT_LOOP_MAX_WATCHES];
-  for (size_t index = 0; index < loop->count; index++) {
+  EventWatch snapshot[EVENT_LOOP_MAX_WATCHES];
+  size_t snapshot_count = loop->count;
+  for (size_t index = 0; index < snapshot_count; index++) {
+    snapshot[index] = loop->watches[index];
     descriptors[index] = (struct pollfd){
-        .fd = loop->watches[index].file_descriptor,
-        .events = loop->watches[index].events,
+        .fd = snapshot[index].file_descriptor,
+        .events = snapshot[index].events,
         .revents = 0,
     };
   }
 
   int ready;
-  nfds_t descriptor_count = (nfds_t)loop->count;
+  nfds_t descriptor_count = (nfds_t)snapshot_count;
   do {
     ready = poll(descriptors, descriptor_count, timeout_milliseconds);
   } while (ready < 0 && errno == EINTR);
@@ -90,16 +84,14 @@ int event_loop_run_once(EventLoop *loop, int timeout_milliseconds) {
     return ready;
 
   int callbacks = 0;
-  loop->dispatching = 1;
-  for (size_t index = 0; index < loop->count; index++) {
+  for (size_t index = 0; index < snapshot_count; index++) {
     if (descriptors[index].revents != 0) {
-      EventWatch watch = loop->watches[index];
+      EventWatch watch = snapshot[index];
       watch.callback(watch.file_descriptor, descriptors[index].revents,
                      watch.context);
       callbacks++;
     }
   }
-  loop->dispatching = 0;
   return callbacks;
 }
 

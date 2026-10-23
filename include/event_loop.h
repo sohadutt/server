@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <poll.h>
 
-#define EVENT_LOOP_MAX_WATCHES 256U
+#define EVENT_LOOP_MAX_WATCHES 4096U
 
 typedef struct EventLoop EventLoop;
 typedef void (*EventLoopCallback)(int file_descriptor, short events,
@@ -16,7 +16,7 @@ int event_loop_add(EventLoop *loop, int file_descriptor, short events,
                    EventLoopCallback callback, void *context);
 int event_loop_remove(EventLoop *loop, int file_descriptor);
 /* Waits once; returns number of callbacks, 0 on timeout, or -1 on error. */
-/* Watch registration must not be changed while a callback is being dispatched. */
+/* Callbacks may add or remove watches; the current poll uses a stable snapshot. */
 int event_loop_run_once(EventLoop *loop, int timeout_milliseconds);
 size_t event_loop_count(const EventLoop *loop);
 

@@ -4,7 +4,32 @@
 
 #include <errno.h>
 #include <poll.h>
+#include <stdint.h>
 #include <sys/socket.h>
+#include <time.h>
+
+static uint64_t monotonic_nanoseconds(void) {
+  struct timespec now;
+  if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+    return 0;
+  return (uint64_t)now.tv_sec * UINT64_C(1000000000) +
+         (uint64_t)now.tv_nsec;
+}
+
+static int wait_for_write(HttpTransport *transport, short event) {
+  uint64_t started = monotonic_nanoseconds();
+  struct pollfd descriptor = {.fd = transport->socket_fd, .events = event};
+  int result;
+  do {
+    result = poll(&descriptor, 1, 15000);
+  } while (result < 0 && errno == EINTR);
+  uint64_t finished = monotonic_nanoseconds();
+  if (event == POLLOUT && finished >= started)
+    transport->write_wait_ns += finished - started;
+  if (result == 0)
+    errno = ETIMEDOUT;
+  return result;
+}
 
 int http_transport_wait_readable(HttpTransport *transport, int timeout_ms) {
   if (transport == NULL || transport->socket_fd < 0) {
@@ -75,30 +100,64 @@ ssize_t http_transport_write(HttpTransport *transport, const void *buffer,
   }
   if (length == 0)
     return 0;
+  uint64_t started = monotonic_nanoseconds();
   if (transport->tls == NULL) {
     int flags = 0;
 #ifdef MSG_NOSIGNAL
     flags |= MSG_NOSIGNAL;
 #endif
-    return send(transport->socket_fd, buffer, length, flags);
+    for (;;) {
+#ifdef MSG_DONTWAIT
+      ssize_t sent = send(transport->socket_fd, buffer, length,
+                          flags | MSG_DONTWAIT);
+#else
+      ssize_t sent = send(transport->socket_fd, buffer, length, flags);
+#endif
+      if (sent >= 0) {
+        uint64_t finished = monotonic_nanoseconds();
+        if (finished >= started)
+          transport->write_time_ns += finished - started;
+        return sent;
+      }
+      if (errno == EINTR)
+        continue;
+      if (errno != EAGAIN && errno != EWOULDBLOCK)
+        break;
+      if (wait_for_write(transport, POLLOUT) <= 0)
+        break;
+    }
+    uint64_t finished = monotonic_nanoseconds();
+    if (finished >= started)
+      transport->write_time_ns += finished - started;
+    return -1;
   }
   for (;;) {
     size_t sent = 0;
     ERR_clear_error();
     int result = SSL_write_ex(transport->tls, buffer, length, &sent);
-    if (result == 1)
+    if (result == 1) {
+      uint64_t finished = monotonic_nanoseconds();
+      if (finished >= started)
+        transport->write_time_ns += finished - started;
       return (ssize_t)sent;
+    }
     int ssl_error = SSL_get_error(transport->tls, result);
     if (ssl_error == SSL_ERROR_WANT_READ || ssl_error == SSL_ERROR_WANT_WRITE) {
       short event = ssl_error == SSL_ERROR_WANT_READ ? POLLIN : POLLOUT;
-      if (wait_for_ssl_event(transport, event) > 0)
+      if (wait_for_write(transport, event) > 0)
         continue;
+      uint64_t finished = monotonic_nanoseconds();
+      if (finished >= started)
+        transport->write_time_ns += finished - started;
       return -1;
     }
     if (ssl_error == SSL_ERROR_SYSCALL && errno == 0)
       errno = EPIPE;
     else if (ssl_error != SSL_ERROR_SYSCALL)
       errno = EPROTO;
+    uint64_t finished = monotonic_nanoseconds();
+    if (finished >= started)
+      transport->write_time_ns += finished - started;
     return -1;
   }
 }

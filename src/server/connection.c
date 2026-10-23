@@ -17,7 +17,6 @@
 #include <unistd.h>
 
 #include "logger.h"
-#include "print_api.h"
 #include "request.h"
 #include "rate_limit.h"
 #include "resource_monitor.h"
@@ -30,7 +29,6 @@ static RateLimiter address_rate_limiter = RATE_LIMITER_INITIALIZER;
 static RateLimiter session_rate_limiter = RATE_LIMITER_INITIALIZER;
 
 #define HTTP_KEEP_ALIVE_MAX_REQUESTS 16U
-#define HTTP_KEEP_ALIVE_IDLE_TIMEOUT_MS 1000
 
 static int peer_is_loopback(const struct sockaddr *address) {
   if (address == NULL)
@@ -338,19 +336,61 @@ static void close_transport(HttpTransport *transport) {
   transport->tls = NULL;
 }
 
-void connection_handle(int client, const struct sockaddr *peer_address,
-                       socklen_t peer_address_length,
-                       const ServerConfig *config,
-                       const StaticFileServer *static_files,
-                       DataStore *data_store, TlsServer *tls_server,
-                       const HttpRouter *router) {
-  if (client < 0)
-    return;
-  if (config == NULL || static_files == NULL || router == NULL) {
-    close(client);
-    return;
-  }
+struct Connection {
+  uint64_t request_id;
+  unsigned request_count;
+  int tls_initialized;
+  HttpTransport transport;
+  struct sockaddr_storage peer_address;
+  socklen_t peer_address_length;
+  const ServerConfig *config;
+  const StaticFileServer *static_files;
+  DataStore *data_store;
+  TlsServer *tls_server;
+  const HttpRouter *router;
+  uint64_t tls_handshake_ns;
+  uint64_t request_read_ns;
+};
 
+static uint64_t monotonic_nanoseconds(void) {
+  struct timespec now;
+  if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+    return 0;
+  return (uint64_t)now.tv_sec * UINT64_C(1000000000) +
+         (uint64_t)now.tv_nsec;
+}
+
+Connection *connection_create(int client, const struct sockaddr *peer_address,
+                              socklen_t peer_address_length,
+                              uint64_t request_id, const ServerConfig *config,
+                              const StaticFileServer *static_files,
+                              DataStore *data_store, TlsServer *tls_server,
+                              const HttpRouter *router) {
+  if (client < 0 || peer_address == NULL ||
+      peer_address_length > sizeof(struct sockaddr_storage) || config == NULL ||
+      static_files == NULL || router == NULL) {
+    if (client >= 0)
+      close(client);
+    errno = EINVAL;
+    return NULL;
+  }
+  Connection *connection = calloc(1, sizeof(*connection));
+  if (connection == NULL) {
+    close(client);
+    return NULL;
+  }
+  connection->request_id = request_id;
+  connection->transport.socket_fd = client;
+  connection->peer_address_length = peer_address_length;
+  memcpy(&connection->peer_address, peer_address,
+         peer_address_length <= sizeof(connection->peer_address)
+             ? peer_address_length
+             : sizeof(connection->peer_address));
+  connection->config = config;
+  connection->static_files = static_files;
+  connection->data_store = data_store;
+  connection->tls_server = tls_server;
+  connection->router = router;
   const struct timeval receive_timeout = {.tv_sec = 10, .tv_usec = 0};
   const struct timeval send_timeout = {.tv_sec = 15, .tv_usec = 0};
   if (setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &receive_timeout,
@@ -360,240 +400,279 @@ void connection_handle(int client, const struct sockaddr *peer_address,
     int socket_error = errno;
     log_warnf("Could not set client socket timeouts: %s",
               strerror(socket_error));
-    close(client);
-    return;
+    connection_destroy(connection);
+    errno = socket_error;
+    return NULL;
   }
-
-  HttpTransport transport = {.socket_fd = client, .tls = NULL};
   log_peer(peer_address, peer_address_length);
-  if (config->tls_enabled) {
-    transport.tls = tls_server_accept(tls_server, client);
-    if (transport.tls == NULL) {
-      close_transport(&transport);
-      return;
-    }
-  }
+  return connection;
+}
 
+int connection_file_descriptor(const Connection *connection) {
+  return connection != NULL ? connection->transport.socket_fd : -1;
+}
+
+void connection_destroy(Connection *connection) {
+  if (connection == NULL)
+    return;
+  close_transport(&connection->transport);
+  free(connection);
+}
+
+static int connection_process_one_impl(Connection *connection) {
+  if (connection == NULL)
+    return 0;
+  HttpTransport *transport = &connection->transport;
+  if (!connection->tls_initialized && connection->config->tls_enabled) {
+    uint64_t handshake_started = monotonic_nanoseconds();
+    transport->tls = tls_server_accept(connection->tls_server,
+                                        transport->socket_fd);
+    uint64_t handshake_finished = monotonic_nanoseconds();
+    if (handshake_finished >= handshake_started)
+      connection->tls_handshake_ns = handshake_finished - handshake_started;
+    if (transport->tls == NULL)
+      return 0;
+  }
+  connection->tls_initialized = 1;
+  logger_set_request_id(connection->request_id);
+  const struct sockaddr *peer_address =
+      (const struct sockaddr *)&connection->peer_address;
+  const ServerConfig *config = connection->config;
+  const StaticFileServer *static_files = connection->static_files;
+  DataStore *data_store = connection->data_store;
+  const HttpRouter *router = connection->router;
   ResourceUsageSnapshot request_start;
-  for (unsigned request_number = 0;
-       request_number < HTTP_KEEP_ALIVE_MAX_REQUESTS; request_number++) {
-    struct timespec request_started = {0};
-    int have_request_start =
-        clock_gettime(CLOCK_MONOTONIC, &request_started) == 0;
-    int monitor_request = config->log_level == LOG_DEBUG &&
-                          resource_monitor_capture(&request_start) == 0;
+  unsigned request_number = connection->request_count;
+  struct timespec request_started = {0};
+  int have_request_start =
+      clock_gettime(CLOCK_MONOTONIC, &request_started) == 0;
+  int monitor_request = config->log_level == LOG_DEBUG &&
+                        resource_monitor_capture(&request_start) == 0;
 
-    HttpRequest request = {0};
-    int read_result = request_number == 0
-                          ? http_request_receive(&transport, &request)
-                          : http_request_receive_timeout(
-                                &transport, &request,
-                                HTTP_KEEP_ALIVE_IDLE_TIMEOUT_MS);
-    if (request_number > 0 && read_result <= 0)
-      break;
-    transport.keep_alive = 0;
-    transport.gzip_enabled = config->gzip_enabled;
-    transport.accepts_gzip = http_request_accepts_gzip(&request);
-    if (read_result < 0) {
-      int read_error = errno;
-      log_debugf("Could not read complete request from client: %s",
-                 read_error != 0 ? strerror(read_error) : "connection closed");
-    } else {
-      http_request_log_debug(&request);
-    }
-
-    HttpRequestLine request_line = {0};
-    int request_line_valid =
-        read_result > 0 && http_request_line_parse(&request, &request_line) == 0;
-    int headers_valid = request_line_valid &&
-                        http_request_headers_valid(&request, request_line.version);
-    int request_valid = request_line_valid && headers_valid;
-    if (!request_valid) {
-      char identity[INET6_ADDRSTRLEN] = {0};
-      uint64_t now = 0;
-      client_identity(peer_address, NULL, identity, sizeof(identity));
-      int may_reply = !config->rate_limiting_enabled ||
-                      (monotonic_seconds(&now) == 0 &&
-                       rate_limiter_allow(&address_rate_limiter, identity,
-                                          RATE_LIMIT_MALFORMED, now));
-      size_t bytes_sent = may_reply
-                              ? http_response_send(
-                                    &transport, 400, "Bad Request",
-                                    "text/plain; charset=utf-8",
-                                    "Bad Request\n", sizeof("Bad Request\n") - 1)
-                              : 0;
-      size_t bytes_received = request.length;
-      drain_rejected_body(&transport, &request, headers_valid,
-                          &bytes_received);
-      log_debug(may_reply ? "Rejected malformed HTTP request"
-                          : "Dropped malformed request from throttled client");
-      if (monitor_request)
-        resource_monitor_log_request(&request_start, request.data,
-                                     bytes_received, bytes_sent);
-      log_request_summary(request_line_valid ? &request_line : NULL, 400,
-                          bytes_received, bytes_sent,
-                          have_request_start ? &request_started : NULL);
-      close_transport(&transport);
-      return;
-    }
-
-    const HttpRoute *route = NULL;
-    HttpRouteResult route_result =
-        http_router_resolve(router, request_line.method, request_line.target,
-                            &route);
-
-    if (request_line_valid && route_result == HTTP_ROUTE_METHOD_NOT_ALLOWED) {
-      size_t bytes_sent = http_response_send(
-          &transport, 405, "Method Not Allowed", "text/plain; charset=utf-8",
-          "Method Not Allowed\n", sizeof("Method Not Allowed\n") - 1);
-      size_t bytes_received = request.length;
-      drain_rejected_body(&transport, &request, headers_valid,
-                          &bytes_received);
-      if (monitor_request)
-        resource_monitor_log_request(&request_start, request.data,
-                                     bytes_received, bytes_sent);
-      log_request_summary(&request_line, 405, bytes_received, bytes_sent,
-                          have_request_start ? &request_started : NULL);
-      close_transport(&transport);
-      return;
-    }
-
-    if (route_result == HTTP_ROUTE_MATCHED &&
-        route->action == HTTP_ROUTE_API) {
-      RateLimitKind limit_kind;
-      char identity[INET6_ADDRSTRLEN] = {0};
-      uint64_t now = 0;
-      client_identity(peer_address, &request, identity, sizeof(identity));
-      int rate_limited = config->rate_limiting_enabled &&
-                         (monotonic_seconds(&now) != 0 ||
-                          !rate_limit_kind(request_line.target, &limit_kind) ||
-                          !rate_limiter_allow(&address_rate_limiter, identity,
-                                              RATE_LIMIT_API, now) ||
-                          (limit_kind != RATE_LIMIT_API &&
-                           !rate_limiter_allow(&address_rate_limiter, identity,
-                                               limit_kind, now)));
-      size_t path_length = strcspn(request_line.target, "?");
-      int is_print = path_length == sizeof("/api/print") - 1 &&
-                     memcmp(request_line.target, "/api/print", path_length) == 0;
-      int is_login = path_length == sizeof("/api/login") - 1 &&
-                     memcmp(request_line.target, "/api/login", path_length) == 0;
-      int is_signup = path_length == sizeof("/api/signup") - 1 &&
-                      memcmp(request_line.target, "/api/signup", path_length) == 0;
-      if (config->rate_limiting_enabled && !rate_limited && !is_login &&
-          !is_signup &&
-          strncmp(request_line.target, "/api/admin/", 11) != 0) {
-        char session_key[RATE_LIMITER_KEY_CAPACITY] = {0};
-        if (request_session_key(&request, data_store, session_key,
-                                sizeof(session_key)) == 0) {
-          rate_limited =
-              !rate_limiter_allow(&session_rate_limiter, session_key,
-                                  RATE_LIMIT_SESSION, now) ||
-              (is_print &&
-               !rate_limiter_allow(&session_rate_limiter, session_key,
-                                   RATE_LIMIT_PRINT, now));
-        }
-        OPENSSL_cleanse(session_key, sizeof(session_key));
-      }
-      if (rate_limited) {
-          static const char response[] = "{\"error\":\"rate limit exceeded\"}\n";
-          size_t bytes_sent = http_response_send(
-              &transport, 429, "Too Many Requests", "application/json",
-              response, sizeof(response) - 1);
-          size_t bytes_received = request.length;
-          drain_rejected_body(&transport, &request, headers_valid,
-                              &bytes_received);
-          if (monitor_request) {
-            resource_monitor_log_request(&request_start, request.data,
-                                         bytes_received, bytes_sent);
-          }
-          log_request_summary(&request_line, 429, bytes_received, bytes_sent,
-                              have_request_start ? &request_started : NULL);
-          close_transport(&transport);
-          return;
-      }
-      size_t bytes_sent = 0;
-      size_t api_bytes_received = request.length;
-      (void)api_handle_request(&transport, &request, request_line.method,
-                               request_line.target, config, data_store,
-                               &api_bytes_received, &bytes_sent);
-      drain_rejected_body(&transport, &request, headers_valid,
-                          &api_bytes_received);
-      if (monitor_request) {
-        resource_monitor_log_request(&request_start, request.data,
-                                     api_bytes_received, bytes_sent);
-      }
-      log_request_summary(&request_line, transport.last_status_code,
-                          api_bytes_received, bytes_sent,
-                          have_request_start ? &request_started : NULL);
-      close_transport(&transport);
-      return;
-    }
-
-    int parsed_request = request_line_valid && route != NULL &&
-                         route->action == HTTP_ROUTE_STATIC &&
-                         http_request_is_bodyless(&request);
-    transport.keep_alive = parsed_request &&
-                           request_number + 1 < HTTP_KEEP_ALIVE_MAX_REQUESTS &&
-                           !http_request_has_extra_data(&request) &&
-                           http_request_keep_alive(&request,
-                                                   request_line.version);
-    StaticFile response_file = {0};
-    int status_code = 200;
-    const char *reason_phrase = "OK";
-
-    if (!parsed_request) {
-      status_code = 400;
-      reason_phrase = "Bad Request";
-    } else if (route_result == HTTP_ROUTE_NO_MATCH) {
-      status_code = 404;
-      reason_phrase = "Not Found";
-    } else if (static_file_open(static_files, request_line.target,
-                                &response_file) != 0) {
-      status_code = 404;
-      reason_phrase = "Not Found";
-    }
-
-    if (status_code != 200 &&
-        static_file_open_not_found(static_files, &response_file) != 0) {
-      log_error("Could not load the configured 404 page");
-    }
-
-    if (response_file.data != NULL || response_file.is_stream) {
-      log_debugf("Serving '%s' as %s (HTTP %d)", response_file.relative_path,
-                 response_file.content_type, status_code);
-    }
-
-    const char *content_type = response_file.content_type != NULL
-                                   ? response_file.content_type
-                                   : static_files->default_mime_type;
-    size_t bytes_sent = response_file.is_stream
-                            ? http_response_send_file(
-                                  &transport, status_code, reason_phrase,
-                                  content_type, response_file.fd,
-                                  response_file.length,
-                                  response_file.cache_control != NULL
-                                      ? response_file.cache_control
-                                      : "no-cache")
-                            : http_response_send_static(
-                                  &transport, status_code, reason_phrase,
-                                  content_type, response_file.data,
-                                  response_file.length,
-                                  response_file.cache_control != NULL
-                                      ? response_file.cache_control
-                                      : "no-cache");
-
-    size_t bytes_received = request.length;
-    drain_rejected_body(&transport, &request, headers_valid, &bytes_received);
-
-    if (monitor_request) {
-      resource_monitor_log_request(&request_start, request.data, bytes_received,
-                                   bytes_sent);
-    }
-    log_request_summary(&request_line, status_code, bytes_received, bytes_sent,
-                        have_request_start ? &request_started : NULL);
-    static_file_release(&response_file);
-    if (!transport.keep_alive)
-      break;
+  HttpRequest request = {0};
+  uint64_t read_started = monotonic_nanoseconds();
+  int read_result = http_request_receive_timeout(transport, &request, 10000);
+  uint64_t read_finished = monotonic_nanoseconds();
+  if (read_finished >= read_started)
+    connection->request_read_ns = read_finished - read_started;
+  if (read_result == 0)
+    return 0;
+  transport->keep_alive = 0;
+  transport->gzip_enabled = config->gzip_enabled;
+  transport->accepts_gzip = http_request_accepts_gzip(&request);
+  if (read_result < 0) {
+    int read_error = errno;
+    log_debugf("Could not read complete request from client: %s",
+               read_error != 0 ? strerror(read_error) : "connection closed");
+  } else {
+    http_request_log_debug(&request);
   }
-  close_transport(&transport);
+
+  HttpRequestLine request_line = {0};
+  int request_line_valid =
+      read_result > 0 && http_request_line_parse(&request, &request_line) == 0;
+  int headers_valid = request_line_valid &&
+                      http_request_headers_valid(&request, request_line.version);
+  int request_valid = request_line_valid && headers_valid;
+  if (!request_valid) {
+    char identity[INET6_ADDRSTRLEN] = {0};
+    uint64_t now = 0;
+    client_identity(peer_address, NULL, identity, sizeof(identity));
+    int may_reply = !config->rate_limiting_enabled ||
+                    (monotonic_seconds(&now) == 0 &&
+                     rate_limiter_allow(&address_rate_limiter, identity,
+                                        RATE_LIMIT_MALFORMED, now));
+    size_t bytes_sent = may_reply
+                            ? http_response_send(
+                                  transport, 400, "Bad Request",
+                                  "text/plain; charset=utf-8",
+                                  "Bad Request\n", sizeof("Bad Request\n") - 1)
+                            : 0;
+    size_t bytes_received = request.length;
+    drain_rejected_body(transport, &request, headers_valid,
+                        &bytes_received);
+    log_debug(may_reply ? "Rejected malformed HTTP request"
+                        : "Dropped malformed request from throttled client");
+    if (monitor_request)
+      resource_monitor_log_request(&request_start, request.data,
+                                   bytes_received, bytes_sent);
+    log_request_summary(request_line_valid ? &request_line : NULL, 400,
+                        bytes_received, bytes_sent,
+                        have_request_start ? &request_started : NULL);
+    return 0;
+  }
+
+  const HttpRoute *route = NULL;
+  HttpRouteResult route_result =
+      http_router_resolve(router, request_line.method, request_line.target,
+                          &route);
+
+  if (request_line_valid && route_result == HTTP_ROUTE_METHOD_NOT_ALLOWED) {
+    size_t bytes_sent = http_response_send(
+        transport, 405, "Method Not Allowed", "text/plain; charset=utf-8",
+        "Method Not Allowed\n", sizeof("Method Not Allowed\n") - 1);
+    size_t bytes_received = request.length;
+    drain_rejected_body(transport, &request, headers_valid,
+                        &bytes_received);
+    if (monitor_request)
+      resource_monitor_log_request(&request_start, request.data,
+                                   bytes_received, bytes_sent);
+    log_request_summary(&request_line, 405, bytes_received, bytes_sent,
+                        have_request_start ? &request_started : NULL);
+    return 0;
+  }
+
+  if (route_result == HTTP_ROUTE_MATCHED &&
+      route->action == HTTP_ROUTE_API) {
+    RateLimitKind limit_kind;
+    char identity[INET6_ADDRSTRLEN] = {0};
+    uint64_t now = 0;
+    client_identity(peer_address, &request, identity, sizeof(identity));
+    int rate_limited = config->rate_limiting_enabled &&
+                       (monotonic_seconds(&now) != 0 ||
+                        !rate_limit_kind(request_line.target, &limit_kind) ||
+                        !rate_limiter_allow(&address_rate_limiter, identity,
+                                            RATE_LIMIT_API, now) ||
+                        (limit_kind != RATE_LIMIT_API &&
+                         !rate_limiter_allow(&address_rate_limiter, identity,
+                                             limit_kind, now)));
+    size_t path_length = strcspn(request_line.target, "?");
+    int is_print = path_length == sizeof("/api/print") - 1 &&
+                   memcmp(request_line.target, "/api/print", path_length) == 0;
+    int is_login = path_length == sizeof("/api/login") - 1 &&
+                   memcmp(request_line.target, "/api/login", path_length) == 0;
+    int is_signup = path_length == sizeof("/api/signup") - 1 &&
+                    memcmp(request_line.target, "/api/signup", path_length) == 0;
+    if (config->rate_limiting_enabled && !rate_limited && !is_login &&
+        !is_signup &&
+        strncmp(request_line.target, "/api/admin/", 11) != 0) {
+      char session_key[RATE_LIMITER_KEY_CAPACITY] = {0};
+      if (request_session_key(&request, data_store, session_key,
+                              sizeof(session_key)) == 0) {
+        rate_limited =
+            !rate_limiter_allow(&session_rate_limiter, session_key,
+                                RATE_LIMIT_SESSION, now) ||
+            (is_print &&
+             !rate_limiter_allow(&session_rate_limiter, session_key,
+                                 RATE_LIMIT_PRINT, now));
+      }
+      OPENSSL_cleanse(session_key, sizeof(session_key));
+    }
+    if (rate_limited) {
+        static const char response[] = "{\"error\":\"rate limit exceeded\"}\n";
+        size_t bytes_sent = http_response_send(
+            transport, 429, "Too Many Requests", "application/json",
+            response, sizeof(response) - 1);
+        size_t bytes_received = request.length;
+        drain_rejected_body(transport, &request, headers_valid,
+                            &bytes_received);
+        if (monitor_request) {
+          resource_monitor_log_request(&request_start, request.data,
+                                       bytes_received, bytes_sent);
+        }
+        log_request_summary(&request_line, 429, bytes_received, bytes_sent,
+                            have_request_start ? &request_started : NULL);
+        return 0;
+    }
+    size_t bytes_sent = 0;
+    size_t api_bytes_received = request.length;
+    (void)api_handle_request(transport, &request, request_line.method,
+                             request_line.target, config, data_store,
+                             &api_bytes_received, &bytes_sent);
+    drain_rejected_body(transport, &request, headers_valid,
+                        &api_bytes_received);
+    if (monitor_request) {
+      resource_monitor_log_request(&request_start, request.data,
+                                   api_bytes_received, bytes_sent);
+    }
+    log_request_summary(&request_line, transport->last_status_code,
+                        api_bytes_received, bytes_sent,
+                        have_request_start ? &request_started : NULL);
+    return 0;
+  }
+
+  int parsed_request = request_line_valid && route != NULL &&
+                       route->action == HTTP_ROUTE_STATIC &&
+                       http_request_is_bodyless(&request);
+  transport->keep_alive = parsed_request &&
+                         request_number + 1 < HTTP_KEEP_ALIVE_MAX_REQUESTS &&
+                         !http_request_has_extra_data(&request) &&
+                         http_request_keep_alive(&request,
+                                                 request_line.version);
+  StaticFile response_file = {0};
+  int status_code = 200;
+  const char *reason_phrase = "OK";
+
+  if (!parsed_request) {
+    status_code = 400;
+    reason_phrase = "Bad Request";
+  } else if (route_result == HTTP_ROUTE_NO_MATCH) {
+    status_code = 404;
+    reason_phrase = "Not Found";
+  } else if (static_file_open(static_files, request_line.target,
+                              &response_file) != 0) {
+    status_code = 404;
+    reason_phrase = "Not Found";
+  }
+
+  if (status_code != 200 &&
+      static_file_open_not_found(static_files, &response_file) != 0) {
+    log_error("Could not load the configured 404 page");
+  }
+
+  if (response_file.data != NULL || response_file.is_stream) {
+    log_debugf("Serving '%s' as %s (HTTP %d)", response_file.relative_path,
+               response_file.content_type, status_code);
+  }
+
+  const char *content_type = response_file.content_type != NULL
+                                 ? response_file.content_type
+                                 : static_files->default_mime_type;
+  size_t bytes_sent = response_file.is_stream
+                          ? http_response_send_file(
+                                transport, status_code, reason_phrase,
+                                content_type, response_file.fd,
+                                response_file.length,
+                                response_file.cache_control != NULL
+                                    ? response_file.cache_control
+                                    : "no-cache")
+                          : http_response_send_static(
+                                transport, status_code, reason_phrase,
+                                content_type, response_file.data,
+                                response_file.length,
+                                response_file.cache_control != NULL
+                                    ? response_file.cache_control
+                                    : "no-cache");
+
+  size_t bytes_received = request.length;
+  drain_rejected_body(transport, &request, headers_valid, &bytes_received);
+
+  if (monitor_request) {
+    resource_monitor_log_request(&request_start, request.data, bytes_received,
+                                 bytes_sent);
+  }
+  log_request_summary(&request_line, status_code, bytes_received, bytes_sent,
+                      have_request_start ? &request_started : NULL);
+  static_file_release(&response_file);
+  connection->request_count++;
+  return transport->keep_alive;
+}
+
+int connection_process_one(Connection *connection, ConnectionTimings *timings) {
+  if (connection == NULL)
+    return 0;
+  connection->tls_handshake_ns = 0;
+  connection->request_read_ns = 0;
+  connection->transport.write_time_ns = 0;
+  connection->transport.write_wait_ns = 0;
+  int keep_alive = connection_process_one_impl(connection);
+  if (timings != NULL) {
+    *timings = (ConnectionTimings){
+        .tls_handshake_ns = connection->tls_handshake_ns,
+        .request_read_ns = connection->request_read_ns,
+        .socket_write_ns = connection->transport.write_time_ns,
+        .socket_writable_wait_ns = connection->transport.write_wait_ns,
+    };
+  }
+  return keep_alive;
 }

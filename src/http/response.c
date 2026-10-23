@@ -101,7 +101,7 @@ static size_t send_headers(HttpTransport *transport, int status_code,
               ? "Strict-Transport-Security: max-age=31536000\r\n"
               : "",
           body_length, transport->keep_alive ? "keep-alive" : "close",
-          transport->keep_alive ? "Keep-Alive: timeout=1, max=16\r\n" : "") !=
+          transport->keep_alive ? "Keep-Alive: timeout=15, max=16\r\n" : "") !=
       0) {
     byte_buffer_destroy(&headers);
     return 0;

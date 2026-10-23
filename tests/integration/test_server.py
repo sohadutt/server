@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import http.client
 import os
 import secrets
 import shutil
@@ -189,6 +190,36 @@ class ServerIntegrationTests(unittest.TestCase):
         status, _, body = self.request("GET", "/missing-test-page")
         self.assertEqual(status, 404)
         self.assertIn(b"Page not found", body)
+
+    def test_idle_keep_alive_connections_do_not_occupy_workers(self) -> None:
+        idle_clients: list[http.client.HTTPSConnection] = []
+        try:
+            for _ in range(8):
+                client = http.client.HTTPSConnection(
+                    "127.0.0.1", self.port, timeout=3, context=self.ssl_context
+                )
+                client.request("GET", "/", headers={"Connection": "keep-alive"})
+                response = client.getresponse()
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.getheader("Connection"), "keep-alive")
+                self.assertIn(b"HTTP Server", response.read())
+                idle_clients.append(client)
+
+            # All eight workers are now free to accept another request while
+            # the original TLS sessions remain open and idle.
+            status, _, body = self.request("GET", "/")
+            self.assertEqual(status, 200)
+            self.assertIn(b"HTTP Server", body)
+
+            idle_clients[0].request(
+                "GET", "/", headers={"Connection": "keep-alive"}
+            )
+            reused_response = idle_clients[0].getresponse()
+            self.assertEqual(reused_response.status, 200)
+            self.assertIn(b"HTTP Server", reused_response.read())
+        finally:
+            for client in idle_clients:
+                client.close()
 
     def test_health_and_readiness_probes(self) -> None:
         status, _, body = self.request("GET", "/healthz")

@@ -68,36 +68,55 @@ a fresh connection per request and can exhaust the client's ephemeral ports
 during localhost runs. Compare modes separately because they measure different
 work: keep-alive emphasizes request handling, while close mode includes TCP and
 TLS setup costs.
-The configured `worker_threads` caps server workers at 64. The server uses a
-bounded queue of up to 64 waiting connections per worker; very high concurrency
-may still be limited by the process file-descriptor limit. Debug logging records
-each request and may become the bottleneck; use a non-debug log level and
-disable console/file logging for a maximum-throughput run.
+The configured `worker_threads` caps server workers at 64. Static keep-alive
+sockets release their worker between requests and are watched by the event
+loop. TLS handshakes and active request reads/writes still use workers. The
+server uses a bounded queue of up to 64 waiting connections per worker; queue
+rejections and current worker/connection counts are logged every five seconds.
+Debug logging records each request and may become the bottleneck; use a
+non-debug log level and disable console/file logging for a maximum-throughput
+run.
+
+Before load starts, the benchmark sends a single preflight request and requires
+HTTP 200. This catches wrong paths (including a missing configured 404 page)
+before they contaminate the throughput stages. For meaningful CPU comparisons,
+repeat each mode several times and compare medians; localhost runs share CPU
+between the server and Python client.
+
+Each stage creates exactly the requested number of sequential client worker
+tasks. In keep-alive mode, a worker keeps one HTTP connection and sends one
+request at a time; it reconnects if the server closes that connection. In
+close mode, the worker opens and closes a connection for every request. Stage
+output includes the peak number of simultaneous request coroutines and fully
+established connections. Established connections can stay below the worker
+count while TCP connects or TLS handshakes are in progress; the benchmark does
+not count in-progress handshakes as established sockets.
+
+Latency starts when a worker begins a request and ends after it reads the full
+response body. It includes connection and TLS handshake time whenever a new
+connection is needed, plus client event-loop and protocol time during that
+request. It excludes idle time between requests and scheduling time before a
+worker starts its next request. The server logs five-second samples for process
+CPU, average worker-queue delay, worker service time, TLS handshake,
+request-read, response-write, and explicit writable-wait durations. CPU above
+100% means multiple cores are active. Compare these with 32–128 client runs:
+high CPU and TLS/write time point toward CPU or crypto work; low CPU with high
+queue, read, or writable wait points toward worker saturation or I/O waiting.
+Use `--max-concurrency 128 --step 32` for this range, then compare
+`--connection-mode keep-alive` with `--connection-mode close`.
+
+## Local static-file baseline
+
+One post-change loopback sample on macOS used the same 377-byte
+`/index.html`, 32 server workers, and five-second stages. All requests
+succeeded. Treat these as a local regression baseline, not a capacity promise:
+
+| Protocol and mode | 32 clients | 64 clients |
+| --- | --- | --- |
+| HTTP keep-alive | 25,802 req/s, p95 1.8 ms | 25,530 req/s, p95 3.6 ms |
+| HTTP close | 12,941 req/s, p95 2.6 ms | 13,513 req/s, p95 5.0 ms |
+| HTTPS keep-alive | 13,976 req/s, p95 7.6 ms | 13,519 req/s, p95 15.5 ms |
+| HTTPS close | 2,475 req/s, p95 13.0 ms | 2,731 req/s, p95 19.9 ms |
 
 RSS is whole-process memory, not a per-client allocation estimate. Results
 depend on the host, network, database, and build configuration.
-
-
-The table below is a historical run from before the listener-drain, worker
-queue, and benchmark-accounting fixes. Its throughput column counted attempts,
-so it must not be interpreted as successful requests per second. Rerun the
-benchmark with the current version to obtain comparable success rates and
-failure reasons.
-
-```text
-./scripts/benchmark.sh --path / --max-concurrency 4000 --step 32 --stage-duration 10
-Target: https://localhost:8443/
-Server PID: 70020; baseline RSS: 10.0 MiB
-Load: 32 to 4000 concurrent clients, 10s per stage
-
-Concurrency | Throughput | Successful | Failed | Latency | Server RSS
-   32 clients |    2569.6 req/s |    25696 ok |      0 failed | p50    10.4 ms | p95    11.4 ms | RSS avg/peak 11.6/11.7 MiB
-   64 clients |    3854.0 req/s |    13614 ok |  24926 failed | p50     8.5 ms | p95    32.3 ms | RSS avg/peak 11.8/11.8 MiB
-   96 clients |    4460.5 req/s |     8580 ok |  36025 failed | p50    14.3 ms | p95    49.5 ms | RSS avg/peak 11.9/12.0 MiB
-  128 clients |    4721.3 req/s |     6097 ok |  41116 failed | p50    19.9 ms | p95    67.9 ms | RSS avg/peak 12.1/12.2 MiB
-  160 clients |    4805.2 req/s |     4825 ok |  43227 failed | p50    26.0 ms | p95    84.7 ms | RSS avg/peak 12.2/12.2 MiB
-  192 clients |    4850.1 req/s |     4040 ok |  44461 failed | p50    32.3 ms | p95    99.9 ms | RSS avg/peak 12.2/12.3 MiB
-  224 clients |    4908.7 req/s |     3438 ok |  45649 failed | p50    38.3 ms | p95   115.0 ms | RSS avg/peak 12.3/12.3 MiB
-  256 clients |    4864.8 req/s |     2954 ok |  45694 failed | p50    45.1 ms | p95   131.0 ms | RSS avg/peak 12.3/12.3 MiB
-  288 clients |    4618.7 req/s |     2541 ok |  43646 failed | p50    54.0 ms | p95   147.7 ms | RSS avg/peak 12.5/12.6 MiB
-```

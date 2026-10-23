@@ -347,8 +347,13 @@ static int remaining_timeout_ms(const struct timespec *deadline) {
   return remaining_ms > INT_MAX ? INT_MAX : (int)remaining_ms;
 }
 
-int http_request_receive(HttpTransport *transport, HttpRequest *request) {
+int http_request_receive_timeout(HttpTransport *transport, HttpRequest *request,
+                                 int requested_timeout_ms) {
   if (transport == NULL || transport->socket_fd < 0 || request == NULL) {
+    errno = EINVAL;
+    return -1;
+  }
+  if (requested_timeout_ms < 0) {
     errno = EINVAL;
     return -1;
   }
@@ -358,7 +363,12 @@ int http_request_receive(HttpTransport *transport, HttpRequest *request) {
   if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0) {
     return -1;
   }
-  deadline.tv_sec += HTTP_REQUEST_TIMEOUT_MS / 1000;
+  deadline.tv_sec += requested_timeout_ms / 1000;
+  deadline.tv_nsec += (long)(requested_timeout_ms % 1000) * 1000000L;
+  if (deadline.tv_nsec >= 1000000000L) {
+    deadline.tv_sec++;
+    deadline.tv_nsec -= 1000000000L;
+  }
 
   while (!request_has_header_end(request)) {
     if (request->length == sizeof(request->data) - 1) {
@@ -402,6 +412,78 @@ int http_request_receive(HttpTransport *transport, HttpRequest *request) {
   }
 
   return 1;
+}
+
+int http_request_receive(HttpTransport *transport, HttpRequest *request) {
+  return http_request_receive_timeout(transport, request,
+                                     HTTP_REQUEST_TIMEOUT_MS);
+}
+
+int http_request_has_extra_data(const HttpRequest *request) {
+  if (request == NULL)
+    return 1;
+  size_t header_length = request_header_length(request);
+  return header_length == 0 || header_length != request->length;
+}
+
+int http_request_keep_alive(const HttpRequest *request,
+                            const char *http_version) {
+  if (request == NULL || http_version == NULL)
+    return 0;
+  int keep_alive = strcmp(http_version, "HTTP/1.1") == 0;
+  int close_requested = 0;
+  size_t header_length = request_header_length(request);
+  if (header_length == 0)
+    return 0;
+  size_t position = 0;
+  while (position < header_length && request->data[position] != '\n')
+    position++;
+  if (position < header_length)
+    position++;
+  while (position < header_length) {
+    size_t line_end = position;
+    while (line_end < header_length && request->data[line_end] != '\r' &&
+           request->data[line_end] != '\n')
+      line_end++;
+    if (line_end == position)
+      break;
+    size_t colon = position;
+    while (colon < line_end && request->data[colon] != ':')
+      colon++;
+    if (colon < line_end && colon - position == sizeof("connection") - 1 &&
+        strncasecmp(request->data + position, "connection",
+                    sizeof("connection") - 1) == 0) {
+      size_t item = colon + 1;
+      while (item < line_end) {
+        size_t item_end = item;
+        while (item_end < line_end && request->data[item_end] != ',')
+          item_end++;
+        size_t begin = item;
+        while (begin < item_end &&
+               (request->data[begin] == ' ' || request->data[begin] == '\t'))
+          begin++;
+        while (item_end > begin &&
+               (request->data[item_end - 1] == ' ' ||
+                request->data[item_end - 1] == '\t'))
+          item_end--;
+        size_t length = item_end - begin;
+        if (length == sizeof("close") - 1 &&
+            strncasecmp(request->data + begin, "close", length) == 0)
+          close_requested = 1;
+        else if (length == sizeof("keep-alive") - 1 &&
+                 strncasecmp(request->data + begin, "keep-alive", length) ==
+                     0 &&
+                 strcmp(http_version, "HTTP/1.0") == 0)
+          keep_alive = 1;
+        item = item_end + (item_end < line_end ? 1U : 0U);
+      }
+    }
+    while (line_end < header_length && (request->data[line_end] == '\r' ||
+                                        request->data[line_end] == '\n'))
+      line_end++;
+    position = line_end;
+  }
+  return keep_alive && !close_requested;
 }
 
 int http_request_drain_body(HttpTransport *transport, const HttpRequest *request,

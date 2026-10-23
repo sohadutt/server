@@ -266,6 +266,107 @@ async def request_once(
                 pass
 
 
+class PersistentHTTPClient:
+    """Sequential HTTP/1.1 client that reuses keep-alive connections."""
+
+    def __init__(
+        self, host: str, port: int, path: str, token: str | None,
+        timeout: float, tls_context: ssl.SSLContext | None,
+    ) -> None:
+        self.host = host
+        self.port = port
+        self.path = path
+        self.token = token
+        self.timeout = timeout
+        self.tls_context = tls_context
+        self.reader: asyncio.StreamReader | None = None
+        self.writer: asyncio.StreamWriter | None = None
+
+    async def close(self) -> None:
+        writer, self.writer = self.writer, None
+        self.reader = None
+        if writer is not None:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except (OSError, asyncio.TimeoutError):
+                pass
+
+    async def request(self) -> tuple[int | None, float, str | None]:
+        started = time.monotonic()
+        phase = "connect"
+        try:
+            if self.reader is None or self.writer is None:
+                self.reader, self.writer = await asyncio.wait_for(
+                    asyncio.open_connection(
+                        self.host, self.port, ssl=self.tls_context,
+                        server_hostname=self.host if self.tls_context else None,
+                    ),
+                    timeout=self.timeout,
+                )
+            headers = [
+                f"GET {self.path} HTTP/1.1",
+                f"Host: {self.host}",
+                "Connection: keep-alive",
+                "Accept: */*",
+            ]
+            if self.token is not None:
+                headers.append(f"Authorization: Bearer {self.token}")
+            phase = "write"
+            self.writer.write(("\r\n".join(headers) + "\r\n\r\n").encode("ascii"))
+            await asyncio.wait_for(self.writer.drain(), timeout=self.timeout)
+
+            phase = "response_status"
+            status_line = await asyncio.wait_for(
+                self.reader.readline(), timeout=self.timeout
+            )
+            pieces = status_line.decode("ascii", errors="replace").split()
+            if len(pieces) < 2 or not pieces[1].isdigit():
+                sample = repr(status_line[:80])
+                await self.close()
+                return None, time.monotonic() - started, f"invalid_status_line:{sample}"
+            status = int(pieces[1])
+
+            phase = "response_headers"
+            content_length: int | None = None
+            connection_close = False
+            while True:
+                line = await asyncio.wait_for(
+                    self.reader.readline(), timeout=self.timeout
+                )
+                if line in (b"\r\n", b"\n"):
+                    break
+                if not line:
+                    raise ConnectionError("connection ended inside response headers")
+                name, separator, value = line.partition(b":")
+                if not separator:
+                    raise ValueError("malformed response header")
+                if name.strip().lower() == b"content-length":
+                    content_length = int(value.strip())
+                elif name.strip().lower() == b"connection":
+                    connection_close = value.strip().lower() == b"close"
+            if content_length is None:
+                raise ValueError("response has no Content-Length")
+
+            phase = "response_body"
+            await asyncio.wait_for(
+                self.reader.readexactly(content_length), timeout=self.timeout
+            )
+            if connection_close:
+                await self.close()
+            return status, time.monotonic() - started, None
+        except asyncio.TimeoutError:
+            await self.close()
+            return None, time.monotonic() - started, f"timeout_{phase}"
+        except ssl.SSLError as error:
+            await self.close()
+            return None, time.monotonic() - started, f"tls_{type(error).__name__}"
+        except (OSError, asyncio.IncompleteReadError, ValueError, ConnectionError) as error:
+            await self.close()
+            name = errno.errorcode.get(getattr(error, "errno", None), type(error).__name__)
+            return None, time.monotonic() - started, f"{phase}_{name}"
+
+
 async def run_stage(
     *,
     level: int,
@@ -277,6 +378,7 @@ async def run_stage(
     timeout: float,
     tls_context: ssl.SSLContext | None,
     pid: int,
+    connection_mode: str,
 ) -> StageStats:
     stats = StageStats(concurrency=level)
     deadline = time.monotonic() + duration
@@ -294,11 +396,23 @@ async def run_stage(
 
     async def worker(worker_id: int) -> None:
         token = tokens[worker_id] if tokens else None
-        while time.monotonic() < deadline:
-            status, elapsed, failure_reason = await request_once(
-                host, port, path, token, timeout, tls_context
-            )
-            stats.record(status, elapsed, failure_reason)
+        persistent_client = (
+            PersistentHTTPClient(host, port, path, token, timeout, tls_context)
+            if connection_mode == "keep-alive"
+            else None
+        )
+        try:
+            while time.monotonic() < deadline:
+                if persistent_client is not None:
+                    result = await persistent_client.request()
+                else:
+                    result = await request_once(
+                        host, port, path, token, timeout, tls_context
+                    )
+                stats.record(*result)
+        finally:
+            if persistent_client is not None:
+                await persistent_client.close()
 
     sampler = asyncio.create_task(sample_rss())
     workers = [asyncio.create_task(worker(index)) for index in range(level)]
@@ -357,6 +471,7 @@ async def run_benchmark(
     print(
         f"Load: {levels[0]} to {levels[-1]} concurrent clients, {args.stage_duration:g}s per stage"
     )
+    print(f"Connection mode: {args.connection_mode}")
     if tokens:
         print(f"Temporary authenticated sessions: {len(tokens)}")
     print("\nConcurrency | Successful/s | Attempted/s | Successful | Failed | Latency | RSS")
@@ -378,6 +493,7 @@ async def run_benchmark(
             timeout=args.timeout,
             tls_context=tls_context,
             pid=pid,
+            connection_mode=args.connection_mode,
         )
         rps, p95 = print_stage(stats)
         total_ok += stats.completed
@@ -462,6 +578,12 @@ def main() -> int:
     )
     parser.add_argument(
         "--timeout", type=float, default=5, help="request timeout seconds"
+    )
+    parser.add_argument(
+        "--connection-mode",
+        choices=("keep-alive", "close"),
+        default="keep-alive",
+        help="reuse HTTP/1.1 connections (default) or reconnect each request",
     )
     parser.add_argument(
         "--stop-on-saturation",

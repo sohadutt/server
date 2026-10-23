@@ -1,9 +1,10 @@
 # Load and memory benchmarking
 
-The benchmark ramps load in stages, opens a new TCP connection for every HTTP
-request, and sustains each concurrency level before moving to the next. It
-exercises connection acceptance, the worker queue, request handling, and
-response delivery.
+The benchmark ramps load in stages and sustains each concurrency level before
+moving to the next. Static requests use HTTP/1.1 keep-alive by default, so each
+client reuses its TCP/TLS connection for up to 16 requests. Use
+`--connection-mode close` to measure a new connection and TLS handshake for
+every request. API routes currently close after each response.
 
 ## Static site load
 
@@ -58,12 +59,15 @@ process rather than the proxy. Options include:
 | `--step` | Concurrency increase between stages |
 | `--stage-duration` | Seconds to sustain each stage |
 | `--timeout` | Per-request timeout |
+| `--connection-mode` | `keep-alive` (default) or `close` after each request |
 | `--stop-on-saturation` | End the ramp at the first saturation signal |
 
 For a server ceiling measurement, run the load generator from another machine
-on the same network so it does not compete for CPU, memory, file descriptors,
-and ephemeral ports. This benchmark opens a fresh connection per request, so a
-localhost run can exhaust the client's ephemeral ports and distort results.
+on the same network so it does not compete for CPU and memory. Close mode opens
+a fresh connection per request and can exhaust the client's ephemeral ports
+during localhost runs. Compare modes separately because they measure different
+work: keep-alive emphasizes request handling, while close mode includes TCP and
+TLS setup costs.
 The configured `worker_threads` caps server workers at 64. The server uses a
 bounded queue of up to 64 waiting connections per worker; very high concurrency
 may still be limited by the process file-descriptor limit. Debug logging records

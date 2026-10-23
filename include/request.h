@@ -22,9 +22,14 @@ typedef struct HttpRequest {
 
 /* Returns 1 when data was received, 0 on end-of-stream, and -1 on error. */
 int http_request_receive(HttpTransport *transport, HttpRequest *request);
+int http_request_receive_timeout(HttpTransport *transport,
+                                 HttpRequest *request, int timeout_ms);
 /* Validates HTTP/1 header syntax and rejects ambiguous body framing. */
 int http_request_headers_valid(const HttpRequest *request,
                                const char *http_version);
+int http_request_keep_alive(const HttpRequest *request,
+                            const char *http_version);
+int http_request_has_extra_data(const HttpRequest *request);
 int http_request_accepts_gzip(const HttpRequest *request);
 /* True when the request has valid headers and no unsupported body framing. */
 int http_request_is_bodyless(const HttpRequest *request);

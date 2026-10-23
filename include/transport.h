@@ -12,6 +12,7 @@ typedef struct HttpTransport {
   int last_status_code;
   int gzip_enabled;
   int accepts_gzip;
+  int keep_alive;
 } HttpTransport;
 
 ssize_t http_transport_read(HttpTransport *transport, void *buffer,

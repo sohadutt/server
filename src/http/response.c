@@ -91,14 +91,18 @@ static size_t send_headers(HttpTransport *transport, int status_code,
           "%s"
           "%s"
           "Content-Length: %zu\r\n"
-          "Connection: close\r\n\r\n",
+          "Connection: %s\r\n"
+          "%s"
+          "\r\n",
           status_code, reason_phrase, content_type, cache_control,
           vary_encoding ? "Vary: Accept-Encoding\r\n" : "",
           content_encoding != NULL ? "Content-Encoding: gzip\r\n" : "",
           transport->tls != NULL
               ? "Strict-Transport-Security: max-age=31536000\r\n"
               : "",
-          body_length) != 0) {
+          body_length, transport->keep_alive ? "keep-alive" : "close",
+          transport->keep_alive ? "Keep-Alive: timeout=1, max=16\r\n" : "") !=
+      0) {
     byte_buffer_destroy(&headers);
     return 0;
   }

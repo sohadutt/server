@@ -100,10 +100,14 @@ the public URL. New mounts take effect after restarting the server. See the
 
 ## Connection limits
 
-Connections use a fixed worker pool and a bounded queue of eight pending
+Connections use a fixed worker pool and a bounded queue of 64 pending
 connections per worker. When the queue is full, new connections are closed.
 Request headers have a ten-second total receive deadline, and socket
 read/write timeouts bound worker time for stalled peers.
+Bodyless HTTP/1.1 static requests can reuse a connection for up to 16 requests;
+the server closes idle keep-alive connections after one second. API responses
+and HTTP/1.0 requests close the connection. Requests that include pipelined
+bytes are closed after the current response rather than reinterpreted.
 
 The optional CUPS server and encryption settings are applied during process
 startup before printer operations use the CUPS client library.

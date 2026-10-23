@@ -31,6 +31,10 @@
 
 static volatile sig_atomic_t shutdown_requested = 0;
 static atomic_uint_fast64_t next_request_id = 1;
+static _Thread_local int worker_cups_settings_initialized;
+static _Thread_local int worker_cups_server_is_set;
+static _Thread_local char worker_cups_server[256];
+static _Thread_local http_encryption_t worker_cups_encryption;
 
 static void request_shutdown(int signal_number) {
   (void)signal_number;
@@ -148,12 +152,29 @@ static void process_connection_job(void *argument) {
   AcceptContext *context = job->context;
   if (context == NULL)
     return;
-  cupsSetServer(context->config->cups_server[0] != '\0'
-                    ? context->config->cups_server
-                    : NULL);
-  cupsSetEncryption(context->config->cups_encryption_required
-                        ? HTTP_ENCRYPTION_REQUIRED
-                        : HTTP_ENCRYPTION_IF_REQUESTED);
+  int cups_server_is_set = context->config->cups_server[0] != '\0';
+  http_encryption_t cups_encryption =
+      context->config->cups_encryption_required
+          ? HTTP_ENCRYPTION_REQUIRED
+          : HTTP_ENCRYPTION_IF_REQUESTED;
+  if (!worker_cups_settings_initialized ||
+      worker_cups_server_is_set != cups_server_is_set ||
+      (cups_server_is_set &&
+       strcmp(worker_cups_server, context->config->cups_server) != 0)) {
+    cupsSetServer(cups_server_is_set ? context->config->cups_server : NULL);
+    worker_cups_server_is_set = cups_server_is_set;
+    if (cups_server_is_set)
+      (void)snprintf(worker_cups_server, sizeof(worker_cups_server), "%s",
+                     context->config->cups_server);
+    else
+      worker_cups_server[0] = '\0';
+  }
+  if (!worker_cups_settings_initialized ||
+      worker_cups_encryption != cups_encryption) {
+    cupsSetEncryption(cups_encryption);
+    worker_cups_encryption = cups_encryption;
+  }
+  worker_cups_settings_initialized = 1;
   atomic_fetch_add_explicit(&context->busy_workers, 1, memory_order_relaxed);
   uint64_t started_ns = monotonic_nanoseconds();
   if (started_ns >= job->queued_at_ns)

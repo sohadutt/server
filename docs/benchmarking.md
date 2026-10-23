@@ -119,4 +119,6 @@ succeeded. Treat these as a local regression baseline, not a capacity promise:
 | HTTPS close | 2,475 req/s, p95 13.0 ms | 2,731 req/s, p95 19.9 ms |
 
 RSS is whole-process memory, not a per-client allocation estimate. Results
-depend on the host, network, database, and build configuration.
+depend on the host, network, database, and build configuration. Single-config
+CMake builds default to `Release` so local measurements use compiler
+optimizations; choose `-DCMAKE_BUILD_TYPE=Debug` explicitly when debugging.

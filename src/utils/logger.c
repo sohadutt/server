@@ -3,6 +3,7 @@
 #include <dirent.h>
 #include <inttypes.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
@@ -14,7 +15,7 @@
 #include "logger.h"
 
 static FILE *log_file = NULL;
-static LogLevel minimum_level = LOG_INFO;
+static _Atomic int minimum_level = LOG_INFO;
 static int log_to_console = 1;
 static char log_directory[256];
 static char active_log_date[11];
@@ -194,7 +195,8 @@ int logger_init(const ServerConfig *config) {
     return -1;
   }
 
-  minimum_level = config->log_level;
+  atomic_store_explicit(&minimum_level, config->log_level,
+                        memory_order_relaxed);
   log_to_console = config->log_console || config->log_level == LOG_DEBUG;
   log_file = NULL;
   active_log_date[0] = '\0';
@@ -251,13 +253,20 @@ void logger_set_request_id(uint64_t request_id) {
   current_request_id = request_id;
 }
 
+int logger_is_enabled(LogLevel level) {
+  return (int)level >=
+         atomic_load_explicit(&minimum_level, memory_order_relaxed);
+}
+
 static void log_vmessage(LogLevel level, const char *format,
                          va_list arguments)
     __attribute__((format(printf, 2, 0)));
 
 static void log_vmessage(LogLevel level, const char *format, va_list arguments) {
+  if (!logger_is_enabled(level))
+    return;
   pthread_mutex_lock(&logger_mutex);
-  if (level < minimum_level)
+  if (!logger_is_enabled(level))
     goto done;
 
   struct timespec now;

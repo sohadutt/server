@@ -8,6 +8,9 @@ app's `index.html` when the browser opens a client-side route.
 
 Run this from the server repository. The source directory must have a
 `package-lock.json` (or `npm-shrinkwrap.json`) and a Vite `build` script.
+The setup command installs Node.js and npm with the detected OS package manager
+when they are missing. It also generates `config/server.conf` from the local
+profile if that file does not exist yet.
 
 ```sh
 ./scripts/manage.sh static build dashboard /path/to/dashboard https://print.example.com

@@ -4,6 +4,14 @@ project(http_server VERSION 0.8.0 LANGUAGES C)
 
 include(CTest)
 
+# CMake otherwise defaults single-configuration generators to an unoptimized
+# build, which makes local server benchmarks misleading. Respect explicit user
+# selections and multi-configuration generators.
+if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+    message(STATUS "No build type selected; defaulting to Release")
+endif()
+
 option(ENABLE_FUZZING "Build libFuzzer parser targets (Clang only)" OFF)
 
 find_package(Cups REQUIRED)

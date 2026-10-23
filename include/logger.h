@@ -16,6 +16,7 @@ typedef struct ServerConfig ServerConfig;
 
 int logger_init(const ServerConfig *config);
 void logger_set_request_id(uint64_t request_id);
+int logger_is_enabled(LogLevel level);
 
 void log_message(LogLevel level, const char *message);
 void log_messagef(LogLevel level, const char *format, ...)

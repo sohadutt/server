@@ -592,6 +592,8 @@ int http_request_drain_body(HttpTransport *transport, const HttpRequest *request
 }
 
 void http_request_log_debug(const HttpRequest *request) {
+  if (!logger_is_enabled(LOG_DEBUG))
+    return;
   if (request == NULL || request->length == 0) {
     log_debug("Client message: <empty>");
     return;

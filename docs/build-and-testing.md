@@ -99,8 +99,12 @@ On Linux, create a systemd user-service unit with:
 Review the generated writable paths before enabling the unit; see the
 [operations guide](manuals/operations.md).
 
-The script does not install system packages. Install the build requirements
-first. Press Ctrl-C to stop the server.
+When invoked through `manage.sh`, missing build packages are installed using
+Homebrew on macOS or apt, dnf, pacman, or zypper on supported Linux
+distributions. This may request administrator privileges. Direct CMake builds
+still require those tools and libraries to be installed already. If the server
+config is missing, `manage.sh server` generates `config/server.conf` and asks
+whether to use the local or public profile. Press Ctrl-C to stop the server.
 
 Native HTTPS is built into the C server. Generate a self-signed certificate for
 local development:

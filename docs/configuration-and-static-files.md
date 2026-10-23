@@ -7,6 +7,15 @@ lines beginning with `#` are ignored. Missing settings use these defaults.
 `document_root`, `mime_types_file`, and TLS certificate/key paths are relative
 to the process working directory unless they are absolute paths.
 
+If the file is missing or empty, `./scripts/manage.sh config init` generates it
+from the tracked `config/server.conf.example` template. The command offers a
+local profile (`127.0.0.1`, port 8080, HTTP) or public profile (`0.0.0.0`, port 8443,
+native HTTPS); pass `--profile local` or `--profile public` to choose without
+the prompt. Generated files are mode `0600`. Public profile certificate and
+key paths must point to a trusted certificate pair before exposing the server.
+The config generator refuses to replace an existing non-empty file unless
+`--force` is supplied.
+
 | Setting | Default | Valid values |
 | --- | --- | --- |
 | `host` | `0.0.0.0` | Host name or IP address |

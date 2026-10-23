@@ -276,6 +276,8 @@ static int monotonic_seconds(uint64_t *seconds) {
 }
 
 static void log_peer(const struct sockaddr *address, socklen_t address_length) {
+  if (!logger_is_enabled(LOG_DEBUG))
+    return;
   char host[128];
   char service[16];
   if (address != NULL &&
@@ -291,6 +293,8 @@ static void log_request_summary(const HttpRequestLine *request_line,
                                 int status_code, size_t bytes_received,
                                 size_t bytes_sent,
                                 const struct timespec *started) {
+  if (!logger_is_enabled(LOG_DEBUG))
+    return;
   struct timespec finished;
   if (clock_gettime(CLOCK_MONOTONIC, &finished) != 0)
     return;
@@ -444,9 +448,10 @@ static int connection_process_one_impl(Connection *connection) {
   ResourceUsageSnapshot request_start;
   unsigned request_number = connection->request_count;
   struct timespec request_started = {0};
-  int have_request_start =
-      clock_gettime(CLOCK_MONOTONIC, &request_started) == 0;
-  int monitor_request = config->log_level == LOG_DEBUG &&
+  int debug_request = logger_is_enabled(LOG_DEBUG);
+  int have_request_start = debug_request &&
+                           clock_gettime(CLOCK_MONOTONIC, &request_started) == 0;
+  int monitor_request = debug_request &&
                         resource_monitor_capture(&request_start) == 0;
 
   HttpRequest request = {0};

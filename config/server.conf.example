@@ -1,0 +1,41 @@
+# Generated profile: @PROFILE@.
+# Values wrapped in @...@ are replaced by the setup script.
+host = @HOST@
+port = @PORT@
+
+# Public profile requires a trusted certificate and matching private key.
+tls_enabled = @TLS_ENABLED@
+tls_certificate_file = @TLS_CERTIFICATE@
+tls_private_key_file = @TLS_PRIVATE_KEY@
+
+# Keep throttling on for local and internet-facing servers.
+rate_limiting_enabled = @RATE_LIMITING_ENABLED@
+gzip_enabled = true
+
+log_level = info
+log_console = true
+log_file = true
+log_directory = logs
+log_retention_days = 30
+
+# Automatic worker count uses online CPU count, capped at 64.
+worker_threads = auto
+
+document_root = public
+index_file = index.html
+not_found_page = 404.html
+mime_types_file = config/mime.types
+default_mime_type = application/octet-stream
+max_static_file_size_mb = 64
+
+# Keep signup disabled until phone ownership verification is available.
+signup_enabled = false
+
+# Add mounts with: static_mount = /portal|apps/portal|spa
+# cups_server = print-server.example:631
+cups_encryption_required = false
+
+database_path = data/server.sqlite
+
+# Set an admin secret with: openssl rand -hex 32
+# admin_api_token =

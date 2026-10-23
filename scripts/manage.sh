@@ -13,7 +13,8 @@ Usage:
   scripts/manage.sh [run options]       Build, configure, and start local HTTPS
   scripts/manage.sh menu                Open the interactive setup menu
   scripts/manage.sh check               Configure and build only
-  scripts/manage.sh config init [path]  Generate a private config from defaults
+  scripts/manage.sh config init [path] [--profile local|public] [--force]
+                                         Generate a private config in config/
   scripts/manage.sh cert [options]      Create a development TLS certificate
   scripts/manage.sh cups ACTION         Manage CUPS and printer queues
   scripts/manage.sh server [options]    Build and run a configured server
@@ -28,7 +29,7 @@ Run options:
   --with-cups     Start/enable the system CUPS service before building
   --force-cert    Replace an existing development certificate and key
   --check         Configure and build only; do not create secrets or start
-  --start         Start an existing build with an existing config; skip build
+  --start         Start an existing build; generate config/server.conf if needed
   --build         Build the project only; do not create secrets or start
   -h, --help      Show this help
 
@@ -92,12 +93,15 @@ config_command() {
   if (($#)); then shift; fi
   case "$action" in
     init)
-      local target="$project_dir/build/local-setup/server.conf" force=0 path_set=0
+      local target="$project_dir/config/server.conf" force=0 path_set=0 profile=""
       while (($#)); do
         case "$1" in
           --force) force=1; shift ;;
+          --profile)
+            (($# >= 2)) || { printf 'Missing value for --profile.\n' >&2; return 2; }
+            profile="$2"; shift 2 ;;
           -h|--help)
-            printf 'Usage: manage.sh config init [path] [--force]\n'
+            printf 'Usage: manage.sh config init [path] [--profile local|public] [--force]\n'
             return 0
             ;;
           -* ) printf 'Unknown config option: %s\n' "$1" >&2; return 2 ;;
@@ -112,27 +116,64 @@ config_command() {
             ;;
         esac
       done
-      local template="$project_dir/config/server.conf" target_dir target_name temp_file
+      if [[ -z "$profile" ]]; then
+        if [[ -t 0 ]]; then
+          printf 'Choose a config profile:\n  1) Local development (loopback, HTTP)\n  2) Public server (all interfaces, HTTPS)\n'
+          local profile_choice
+          read -r -p 'Profile [1]: ' profile_choice || return 1
+          case "${profile_choice:-1}" in
+            1) profile=local ;;
+            2) profile=public ;;
+            *) printf 'Choose 1 (local) or 2 (public).\n' >&2; return 2 ;;
+          esac
+        else
+          profile=local
+          printf 'No interactive input; using the local config profile.\n'
+        fi
+      fi
+      [[ "$profile" == local || "$profile" == public ]] || {
+        printf 'Config profile must be local or public.\n' >&2; return 2; }
+      local template="$project_dir/config/server.conf.example" target_dir target_name temp_file
       [[ -f "$template" ]] || { printf 'Config template not found: %s\n' "$template" >&2; return 1; }
       target_dir="$(dirname -- "$target")"
       target_name="$(basename -- "$target")"
       mkdir -p -- "$target_dir"
-      if [[ -e "$target" && "$force" -ne 1 ]]; then
+      if [[ -s "$target" && "$force" -ne 1 ]]; then
         printf 'Config already exists: %s (pass --force to replace it).\n' "$target" >&2
         return 1
       fi
       temp_file="$(mktemp "$target_dir/.${target_name}.XXXXXX")" || return
-      if ! cp -- "$template" "$temp_file" || ! chmod 600 "$temp_file" ||
+      local profile_host=127.0.0.1 profile_port=8080 profile_tls=false
+      local profile_cert=certs/server.crt profile_key=certs/server.key profile_rate=true
+      if [[ "$profile" == public ]]; then
+        profile_host=0.0.0.0
+        profile_port=8443
+        profile_tls=true
+      fi
+      if ! sed \
+          -e "s|@PROFILE@|$profile|g" \
+          -e "s|@HOST@|$profile_host|g" \
+          -e "s|@PORT@|$profile_port|g" \
+          -e "s|@TLS_ENABLED@|$profile_tls|g" \
+          -e "s|@TLS_CERTIFICATE@|$profile_cert|g" \
+          -e "s|@TLS_PRIVATE_KEY@|$profile_key|g" \
+          -e "s|@RATE_LIMITING_ENABLED@|$profile_rate|g" \
+          "$template" > "$temp_file" || ! chmod 600 "$temp_file" ||
          ! mv -f -- "$temp_file" "$target"; then
         rm -f -- "$temp_file"
         printf 'Could not write config file: %s\n' "$target" >&2
         return 1
       fi
-      printf 'Generated config: %s (mode 0600)\n' "$target"
-      printf 'Edit it before starting the server. Keep TLS keys and admin tokens private.\n'
+      printf 'Generated %s config: %s (mode 0600)\n' "$profile" "$target"
+      if [[ "$profile" == public ]]; then
+        printf 'Install a trusted certificate and matching private key at the configured paths before starting HTTPS.\n'
+      else
+        printf 'The local profile listens on loopback over HTTP. Use manage.sh for guided local HTTPS setup.\n'
+      fi
+      printf 'Keep TLS keys and admin tokens private.\n'
       ;;
     -h|--help|help)
-      printf 'Usage: manage.sh config init [path] [--force]\n'
+      printf 'Usage: manage.sh config init [path] [--profile local|public] [--force]\n'
       ;;
     *) printf 'Unknown config action: %s\n' "$action" >&2; return 2 ;;
   esac
@@ -145,10 +186,145 @@ require_command() {
   fi
 }
 
+package_is_installed() {
+  local manager="$1" package="$2"
+  case "$manager" in
+    brew) brew list --versions "$package" >/dev/null 2>&1 ;;
+    apt) [[ "$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null || true)" == 'install ok installed' ]] ;;
+    rpm|dnf|zypper) rpm -q "$package" >/dev/null 2>&1 ;;
+    pacman) pacman -Q "$package" >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
+}
+
+install_missing_packages() {
+  local manager="$1"; shift
+  local package
+  local -a missing=()
+  for package in "$@"; do
+    package_is_installed "$manager" "$package" || missing+=("$package")
+  done
+  ((${#missing[@]} == 0)) && return 0
+
+  printf 'Installing missing system dependencies: %s\n' "${missing[*]}"
+  case "$manager" in
+    brew) brew install "${missing[@]}" ;;
+    apt)
+      run_privileged apt-get update || return
+      run_privileged apt-get install --yes "${missing[@]}"
+      ;;
+    dnf) run_privileged dnf install --assumeyes "${missing[@]}" ;;
+    pacman) run_privileged pacman -Sy --needed --noconfirm "${missing[@]}" ;;
+    zypper) run_privileged zypper --non-interactive install "${missing[@]}" ;;
+    *) printf 'Unsupported package manager: %s\n' "$manager" >&2; return 1 ;;
+  esac
+}
+
+ensure_build_dependencies() {
+  case "$(uname -s)" in
+    Darwin)
+      if ! command -v brew >/dev/null 2>&1; then
+        printf 'Homebrew is required to install missing macOS build packages. Install it from https://brew.sh, then rerun this command.\n' >&2
+        return 1
+      fi
+      if ! xcrun --find clang >/dev/null 2>&1; then
+        printf 'The Xcode Command Line Tools are required. Run: xcode-select --install\n' >&2
+        return 1
+      fi
+      install_missing_packages brew cmake pkgconf openssl@3 python
+      ;;
+    Linux)
+      if command -v apt-get >/dev/null 2>&1; then
+        install_missing_packages apt build-essential cmake libcups2-dev \
+          libsqlite3-dev libssl-dev zlib1g-dev pkg-config python3 openssl
+      elif command -v dnf >/dev/null 2>&1; then
+        install_missing_packages dnf gcc cmake cups-devel sqlite-devel \
+          openssl-devel zlib-devel pkgconf-pkg-config python3 openssl
+      elif command -v pacman >/dev/null 2>&1; then
+        install_missing_packages pacman base-devel cmake cups sqlite openssl \
+          zlib pkgconf python
+      elif command -v zypper >/dev/null 2>&1; then
+        install_missing_packages zypper gcc cmake cups-devel sqlite3-devel \
+          libopenssl-devel zlib-devel pkg-config python3 openssl
+      else
+        printf 'No supported package manager found (apt, dnf, pacman, or zypper). Install the CMake, C compiler, CUPS, SQLite, OpenSSL 3, zlib, pkg-config, Python 3, and OpenSSL CLI packages manually.\n' >&2
+        return 1
+      fi
+      ;;
+    *)
+      printf 'Automatic dependency installation is supported on macOS and common Linux distributions.\n' >&2
+      return 1
+      ;;
+  esac
+}
+
+ensure_node_dependencies() {
+  if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+    return 0
+  fi
+  case "$(uname -s)" in
+    Darwin)
+      command -v brew >/dev/null 2>&1 || {
+        printf 'Install Homebrew from https://brew.sh to install Node.js.\n' >&2
+        return 1
+      }
+      install_missing_packages brew node
+      ;;
+    Linux)
+      if command -v apt-get >/dev/null 2>&1; then
+        install_missing_packages apt nodejs npm
+      elif command -v dnf >/dev/null 2>&1; then
+        install_missing_packages dnf nodejs npm
+      elif command -v pacman >/dev/null 2>&1; then
+        install_missing_packages pacman nodejs npm
+      elif command -v zypper >/dev/null 2>&1; then
+        install_missing_packages zypper nodejs npm
+      else
+        printf 'Install Node.js and npm with your Linux distribution package manager.\n' >&2
+        return 1
+      fi
+      ;;
+    *) printf 'Install Node.js and npm before building a Vite app.\n' >&2; return 1 ;;
+  esac
+  require_command node && require_command npm
+}
+
+ensure_cups_dependencies() {
+  if command -v lpstat >/dev/null 2>&1 && command -v lpinfo >/dev/null 2>&1 &&
+     command -v lpadmin >/dev/null 2>&1; then
+    return 0
+  fi
+  case "$(uname -s)" in
+    Darwin)
+      printf 'The CUPS command-line tools are not available. Enable/install the macOS CUPS components, then rerun this command.\n' >&2
+      return 1
+      ;;
+    Linux)
+      if command -v apt-get >/dev/null 2>&1; then
+        install_missing_packages apt cups cups-client
+      elif command -v dnf >/dev/null 2>&1; then
+        install_missing_packages dnf cups cups-client
+      elif command -v pacman >/dev/null 2>&1; then
+        install_missing_packages pacman cups
+      elif command -v zypper >/dev/null 2>&1; then
+        install_missing_packages zypper cups cups-client
+      else
+        printf 'Install CUPS and its client tools with your Linux package manager.\n' >&2
+        return 1
+      fi
+      require_command lpstat && require_command lpinfo && require_command lpadmin
+      ;;
+    *)
+      printf 'Automatic CUPS installation is supported on common Linux distributions. Install CUPS manually on this OS.\n' >&2
+      return 1
+      ;;
+  esac
+}
+
 build_project() {
-  require_command cmake || return
-  cmake -S "$project_dir" -B "$project_dir/build"
-  cmake --build "$project_dir/build" --parallel
+  ensure_build_dependencies || return
+  cmake -S "$project_dir" -B "$project_dir/build" || return
+  cmake --build "$project_dir/build" --parallel || return
 }
 
 make_certificate() {
@@ -204,19 +380,19 @@ make_certificate() {
 run_privileged() {
   if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then "$@"
   elif command -v sudo >/dev/null 2>&1; then sudo "$@"
-  else printf 'This CUPS operation needs administrator privileges.\n' >&2; return 1
+  else printf 'Installing system packages needs administrator privileges.\n' >&2; return 1
   fi
 }
 
 cups_status() {
-  require_command lpstat || return
+  ensure_cups_dependencies || return
   lpstat -r
   printf '\nConfigured printers and classes:\n'
   lpstat -p -d 2>/dev/null || true
 }
 
 cups_start() {
-  require_command lpstat || return
+  ensure_cups_dependencies || return
   case "$(uname -s)" in
     Linux)
       if command -v systemctl >/dev/null 2>&1; then
@@ -240,13 +416,14 @@ cups_start() {
 }
 
 cups_discover() {
-  require_command lpinfo || return
+  ensure_cups_dependencies || return
   lpinfo -v | awk '$1 == "network" && $2 ~ /^(ipp|ipps|dnssd):\/\// { print $2 }'
 }
 
 cups_add_printer() {
   local queue_name="${1:-}" printer_uri="${2:-}" description="${3:-}" candidate
   (($# <= 3)) || { printf 'Usage: manage.sh cups add-printer [queue-name] [printer-uri] [description]\n' >&2; return 2; }
+  ensure_cups_dependencies || return
   local command_name
   for command_name in lpinfo lpadmin lpstat awk; do require_command "$command_name" || return; done
   if [[ -z "$printer_uri" ]]; then
@@ -305,7 +482,11 @@ server_command() {
   (($# <= 1)) || { printf 'Usage: manage.sh server [--native-tls|--tls] [config-file]\n' >&2; return 2; }
   [[ $# -eq 0 ]] || config_file="$1"
   [[ "$config_file" == /* ]] || config_file="$project_dir/$config_file"
-  [[ -f "$config_file" ]] || { printf 'Config file not found: %s\n' "$config_file" >&2; return 1; }
+  if [[ ! -s "$config_file" ]]; then
+    local -a config_args=(init "$config_file")
+    [[ ! -e "$config_file" ]] || config_args+=(--force)
+    config_command "${config_args[@]}" || return
+  fi
   build_project || return
   if [[ "$mode" == normal ]]; then raise_open_file_limit; exec "$project_dir/build/http_server" "$config_file"; fi
   if [[ "$mode" == native ]]; then
@@ -353,7 +534,11 @@ service_unit_command() {
   (($# <= 1)) || { printf 'Usage: manage.sh service-unit [config-file]\n' >&2; return 2; }
   local config_file="${1:-config/server.conf}" output_dir output_file
   [[ "$config_file" == /* ]] || config_file="$project_dir/$config_file"
-  [[ -f "$config_file" ]] || { printf 'Config file not found: %s\n' "$config_file" >&2; return 1; }
+  if [[ ! -s "$config_file" ]]; then
+    local -a config_args=(init "$config_file")
+    [[ ! -e "$config_file" ]] || config_args+=(--force)
+    config_command "${config_args[@]}" || return
+  fi
   build_project || return
   output_dir="$project_dir/build/deployment"
   output_file="$output_dir/http-server.service"
@@ -396,6 +581,15 @@ static_command() {
   local apps_dir="$project_dir/public/apps"
   local config_file="$project_dir/config/server.conf"
   case "$action" in
+    build|add|list|remove)
+      if [[ ! -s "$config_file" ]]; then
+        local -a config_args=(init "$config_file")
+        [[ ! -e "$config_file" ]] || config_args+=(--force)
+        config_command "${config_args[@]}" || return
+      fi
+      ;;
+  esac
+  case "$action" in
     build|add)
       (($# >= 2 && $# <= 3)) || {
         printf 'Usage: manage.sh static %s NAME %s [https://your-domain]\n' \
@@ -420,7 +614,7 @@ static_command() {
       [[ -d "$input_dir" ]] || { printf 'Directory not found: %s\n' "$input_dir" >&2; return 1; }
       source_dir="$(cd -- "$input_dir" && pwd -P)"
       if [[ "$action" == build ]]; then
-        require_command npm || return
+        ensure_node_dependencies || return
         [[ -f "$source_dir/package.json" ]] || { printf 'Vite source must contain package.json: %s\n' "$source_dir" >&2; return 1; }
         if [[ -f "$source_dir/package-lock.json" || -f "$source_dir/npm-shrinkwrap.json" ]]; then
           (cd "$source_dir" && npm ci && npm run build -- "--base=/$name/") || return
@@ -546,8 +740,17 @@ interactive_menu() {
         run_local --bind "$bind_address" --name "$certificate_name" --port "$port" || action_rc=$?
         ;;
       2)
-        read -r -p 'Output config [build/local-setup/server.conf]: ' config_path || return 0
-        config_command init "${config_path:-build/local-setup/server.conf}" || action_rc=$?
+        printf 'Config profile:\n  1) Local development (127.0.0.1, HTTP)\n  2) Public server (0.0.0.0, HTTPS)\n'
+        read -r -p 'Choose profile [1]: ' action || return 0
+        case "${action:-1}" in
+          1) action=local ;;
+          2) action=public ;;
+          *) printf 'Choose 1 (local) or 2 (public).\n' >&2; action_rc=2 ;;
+        esac
+        if ((action_rc == 0)); then
+          read -r -p 'Output config [config/server.conf]: ' config_path || return 0
+          config_command init "${config_path:-config/server.conf}" --profile "$action" || action_rc=$?
+        fi
         ;;
       3)
         if build_project; then printf 'Build completed.\n'
@@ -630,10 +833,19 @@ run_local() {
     return 2
   fi
   if ((start_only)); then
-    selected_config="${base_config:-$project_dir/build/local-setup/server.conf}"
+    selected_config="$base_config"
     if [[ "$selected_config" == "$project_dir/config/server.conf" &&
-          -f "$project_dir/build/local-setup/server.conf" ]]; then
+          -s "$project_dir/build/local-setup/server.conf" ]]; then
       selected_config="$project_dir/build/local-setup/server.conf"
+    fi
+    if [[ ! -s "$selected_config" ]]; then
+      local -a config_args=(init "$selected_config")
+      [[ ! -e "$selected_config" ]] || config_args+=(--force)
+      config_command "${config_args[@]}" || return
+      if grep -q '^# Generated profile: public\.' "$selected_config"; then
+        printf 'Public config is ready at %s. Install a trusted TLS certificate and matching private key before starting the server.\n' "$selected_config"
+        return 0
+      fi
     fi
     [[ -x "$project_dir/build/http_server" ]] || {
       printf 'Server binary is missing. Run manage.sh check first.\n' >&2; return 1;
@@ -644,10 +856,16 @@ run_local() {
     raise_open_file_limit
     exec "$project_dir/build/http_server" "$selected_config"
   fi
-  [[ -f "$base_config" ]] || {
-    printf 'Base config not found: %s (generate one with manage.sh config init).\n' "$base_config" >&2
-    return 1
-  }
+  if [[ ! -s "$base_config" ]]; then
+    local -a config_args=(init "$base_config")
+    [[ ! -e "$base_config" ]] || config_args+=(--force)
+    config_command "${config_args[@]}" || return
+  fi
+  if grep -q '^# Generated profile: public\.' "$base_config"; then
+    printf 'Public config is ready at %s. Install a trusted TLS certificate, edit its configured paths, then run: manage.sh server --native-tls %s\n' \
+      "$base_config" "$base_config"
+    return 0
+  fi
   [[ "$port" =~ ^[0-9]{1,5}$ ]] && ((10#$port >= 1 && 10#$port <= 65535)) || {
     printf 'Port must be an integer from 1 to 65535.\n' >&2; return 2; }
   [[ "$bind_address" =~ ^[A-Za-z0-9._:%-]+$ && -n "$certificate_name" && "$certificate_name" != *$'\n'* ]] || {

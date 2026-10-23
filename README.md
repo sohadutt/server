@@ -46,3 +46,7 @@ for CLI options, LAN access, and CUPS setup.
 Configuration is in `config/server.conf`; static site files are under
 `public/`; scripts are under `scripts/`; public C interfaces are under
 `include/`; and automated tests are under `tests/`.
+
+Generate a complete private configuration with `./scripts/manage.sh config init`.
+The command prompts for a local or public profile when run interactively; see
+the [setup guide](docs/setup.md) for dependency installation and startup.

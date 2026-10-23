@@ -355,7 +355,8 @@ DataStore *data_store_open(const char *path) {
     free(store);
     return NULL;
   }
-  int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX;
+  /* Every operation on this connection is serialized by DataStore::mutex. */
+  int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX;
 #ifdef SQLITE_OPEN_NOFOLLOW
   flags |= SQLITE_OPEN_NOFOLLOW;
 #endif
@@ -960,7 +961,8 @@ DataResult data_token_authenticate(DataStore *store, const char *token,
     return DATA_ERROR;
   pthread_mutex_lock(&store->mutex);
   static const char sql[] =
-      "SELECT u.id, u.phone_e164, u.credits, u.created_at, u.active, t.id "
+      "SELECT u.id, u.phone_e164, u.credits, u.created_at, u.active, t.id, "
+      "t.last_used_at "
       "FROM user_tokens AS t JOIN users AS u ON u.id = t.user_id "
       "WHERE t.token_hash = ?1 AND t.revoked_at IS NULL "
       "AND (t.expires_at IS NULL OR t.expires_at > "
@@ -975,27 +977,36 @@ DataResult data_token_authenticate(DataStore *store, const char *token,
     result = sqlite3_step(statement);
   DataResult status = DATA_UNAUTHORIZED;
   sqlite3_int64 token_id = 0;
+  sqlite3_int64 last_used_at = 0;
   if (result == SQLITE_ROW) {
     fill_user(statement, user);
     token_id = sqlite3_column_int64(statement, 5);
+    last_used_at = sqlite3_column_int64(statement, 6);
     status = DATA_OK;
   } else if (result != SQLITE_DONE) {
     status = DATA_ERROR;
   }
   sqlite3_finalize(statement);
   if (status == DATA_OK) {
-    sqlite3_stmt *update = NULL;
-    int update_result = sqlite3_prepare_v2(
-        store->database,
-        "UPDATE user_tokens SET last_used_at = "
-        "CAST(strftime('%s', 'now') AS INTEGER) WHERE id = ?1;",
-        -1, &update, NULL);
-    if (update_result == SQLITE_OK)
-      update_result = sqlite3_bind_int64(update, 1, token_id);
-    if (update_result == SQLITE_OK)
-      update_result = sqlite3_step(update);
-    sqlite3_finalize(update);
-    status = update_result == SQLITE_DONE ? DATA_OK : DATA_ERROR;
+    time_t now = time(NULL);
+    /* Keep token usage useful for administration without forcing a SQLite
+       write on every authenticated read request. */
+    if (now > 0 &&
+        (last_used_at <= 0 || (int64_t)now - last_used_at >= 60)) {
+      sqlite3_stmt *update = NULL;
+      int update_result = sqlite3_prepare_v2(
+          store->database,
+          "UPDATE user_tokens SET last_used_at = ?1 WHERE id = ?2;",
+          -1, &update, NULL);
+      if (update_result == SQLITE_OK)
+        update_result = sqlite3_bind_int64(update, 1, (sqlite3_int64)now);
+      if (update_result == SQLITE_OK)
+        update_result = sqlite3_bind_int64(update, 2, token_id);
+      if (update_result == SQLITE_OK)
+        update_result = sqlite3_step(update);
+      sqlite3_finalize(update);
+      status = update_result == SQLITE_DONE ? DATA_OK : DATA_ERROR;
+    }
   }
   pthread_mutex_unlock(&store->mutex);
   OPENSSL_cleanse(digest, sizeof(digest));

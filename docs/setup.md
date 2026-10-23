@@ -11,12 +11,15 @@ printer setup, static app publishing, and development certificates. Use
 `./scripts/manage.sh menu` to reopen it explicitly. All actions also have
 non-interactive command forms.
 
-It checks build dependencies, builds the C server, creates a localhost
-development certificate when one is absent, writes a private TLS-enabled
-runtime config, generates an admin API credential, and starts HTTPS on
-`127.0.0.1:8443`. The base `config/server.conf` remains the editable source
-configuration; generated credentials and runtime files stay under the ignored
-`build/local-setup/` directory.
+If `config/server.conf` is missing or empty, setup generates a complete private
+config there and asks whether it is for local development or a public server.
+The local profile binds to `127.0.0.1` over HTTP; the guided default setup then
+creates a localhost development certificate, writes a private HTTPS runtime
+config, generates an admin API credential, and starts HTTPS on
+`127.0.0.1:8443`. The public profile binds to `0.0.0.0` with native HTTPS and
+requires a trusted certificate and matching key before starting. Generated
+credentials and runtime files stay under the ignored `build/local-setup/`
+directory.
 
 The admin credential is saved with mode `0600` at
 `build/local-setup/admin.token`. Keep it private. You can regenerate it by
@@ -32,7 +35,8 @@ Useful options:
 ./scripts/manage.sh --with-cups
 ./scripts/manage.sh --bind 0.0.0.0 --name printer.example.test --port 8443
 ./scripts/manage.sh --force-cert
-./scripts/manage.sh config init build/local-setup/server.conf
+./scripts/manage.sh config init
+./scripts/manage.sh config init --profile public
 ```
 
 Whenever `manage.sh` starts the server, it raises the soft open-file limit to
@@ -44,14 +48,20 @@ worker count based on online CPUs (at least 4, at most 64); set
 `worker_threads = N` in the config to choose a fixed count.
 
 `--check` configures and builds without generating credentials or starting
-services. `--start` launches an existing binary and config without rebuilding;
-it prefers `build/local-setup/server.conf` unless a config is supplied with
-`--config`. `config init` copies the checked-in starter config to a new path
-with private file permissions and refuses to replace an existing file unless
-`--force` is supplied. `--config FILE` selects the base config used when the
-guided flow writes its generated runtime config. `--with-cups` starts and enables the host CUPS service; it can ask
-for administrator privileges. It does not install operating-system packages
-or add a printer queue. All setup tasks are available through the same script:
+services. `--start` launches an existing binary without rebuilding; it prefers
+the guided runtime config when available and otherwise generates
+`config/server.conf`. `config init` uses the tracked
+`config/server.conf.example` template, writes mode `0600`, and refuses to
+replace a non-empty file unless `--force` is supplied. The interactive profile
+choice defaults to local; non-interactive commands also default to local unless
+`--profile public` is passed. `--config FILE` selects the base config used when
+the guided flow writes its generated runtime config. Build and Vite dependencies
+are checked and missing packages are installed using Homebrew on macOS or apt,
+dnf, pacman, or zypper on supported Linux distributions. Package installation
+may require administrator privileges. CUPS client tools are installed on
+supported Linux distributions when a CUPS command needs them. `--with-cups`
+starts and enables the host CUPS service. All setup tasks are available through
+the same script:
 
 ```sh
 ./scripts/manage.sh cups start
@@ -66,6 +76,8 @@ or add a printer queue. All setup tasks are available through the same script:
 driverless queue. To provide details without prompts, pass
 `queue-name printer-uri "Description"`. `cert` creates a self-signed local
 certificate; add `--force` after `cert` to replace an existing pair.
+For public profile startup, install a trusted certificate and key at the paths
+in `config/server.conf` (defaults: `certs/server.crt` and `certs/server.key`).
 
 The default binding is loopback only. For access from other devices, bind to a
 LAN interface and use a DNS name clients resolve to the host. The generated

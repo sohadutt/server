@@ -6,18 +6,20 @@ The build needs CMake 3.30 or newer, a C23-capable compiler, CUPS development
 headers and library, SQLite 3, and OpenSSL 3.0 or newer. The guided setup also
 uses OpenSSL command-line tools to create a local development certificate.
 
-Install those requirements using your operating system's package manager, then
-run these commands from the repository root:
+Run these commands from the repository root. The setup script checks for and
+installs missing build dependencies with the detected OS package manager:
 
 ```sh
 ./scripts/manage.sh --check
 ./scripts/manage.sh
 ```
 
-The first command configures and builds the project.
-The second creates a local certificate if needed, creates an admin credential,
-and starts the server at `https://localhost:8443/`. The generated private
-configuration and admin token are stored in `build/local-setup/`.
+The first command configures and builds the project. If `config/server.conf`
+does not exist, setup generates it and asks whether you want a local or public
+profile. The guided local setup creates a local certificate if needed, creates
+an admin credential, and starts the server at `https://localhost:8443/`. The
+generated private configuration and admin token are stored in
+`build/local-setup/`.
 
 The certificate is self-signed, so your browser will warn that it is not
 trusted. This is suitable for local development. Do not use it as the public

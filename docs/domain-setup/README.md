@@ -27,7 +27,9 @@ DNS provider's dynamic DNS update.
 
 Allow inbound TCP ports 80 and 443 through the host firewall and any cloud
 firewall/security group. If the server is behind a home router, forward those
-ports to it. Do not expose the application's backend port 8443 publicly.
+ports to it. Do not expose the application's ports 8443 or 8444 publicly.
+Allow inbound UDP port 443 as well if clients should be able to use HTTP/3;
+HTTP/2 continues to use TCP port 443.
 
 Check that DNS resolves before asking Caddy to obtain a certificate:
 
@@ -102,7 +104,7 @@ sudo install -m 0644 certs/server.crt /etc/caddy/server-backend.crt
 
 ```caddyfile
 print.example.com {
-    reverse_proxy https://127.0.0.1:8443 {
+    reverse_proxy https://127.0.0.1:8444 {
         transport http {
             tls_trust_pool file /etc/caddy/server-backend.crt
             tls_server_name print.example.com
@@ -131,6 +133,9 @@ Caddy automatically obtains and renews a public certificate when the domain
 resolves to this host and its validation ports are reachable. See Caddy's
 [HTTPS setup](https://caddyserver.com/docs/quick-starts/https) and
 [reverse proxy documentation](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy).
+Caddy enables HTTP/2 and HTTP/3 on HTTPS sites by default. HTTP/3 requires
+clients and the network path to support QUIC over UDP; otherwise clients use
+HTTP/2 or HTTP/1.1 automatically.
 
 ## 4. Verify the public site
 
@@ -155,7 +160,7 @@ proxies all paths to the C server; add the application mount with
 
 ## Important deployment notes
 
-- Keep port 8443 loopback-only. Caddy should be the only public web listener.
+- Keep ports 8443 and 8444 loopback-only. Caddy should be the only public web listener.
 - Keep `build/local-setup/admin.token`, the generated server config, the
   database, and TLS private key readable only by the service account/admins.
 - Use a stable public IP or keep DNS updated when the public address changes.

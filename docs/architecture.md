@@ -26,7 +26,9 @@ The active request path is:
 storage; HTTP response headers use it to avoid allocating for common replies.
 `http/transport.c` provides plain socket and TLS reads/writes to the request,
 response, API, and print upload handlers. `tls/tls.c` owns the OpenSSL server
-context and performs TLS handshakes. Headers in `include/` define the module
+context and performs TLS handshakes. Native C transport currently supports
+HTTP/1.1; managed and public Caddy frontends negotiate HTTP/2 and can negotiate
+HTTP/3 when QUIC over UDP is available. Headers in `include/` define the module
 interfaces. The worker queue remains bounded so slow clients and long print
 uploads cannot create unbounded task memory. Idle keep-alive sockets are reaped
 after 15 seconds. TLS handshakes and active request reads/writes still run

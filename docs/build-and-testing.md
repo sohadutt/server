@@ -77,8 +77,9 @@ ctest --test-dir build --rerun-failed --output-on-failure
 
 ## Start scripts and HTTPS
 
-The unified setup script can build and start the server using
-`config/server.conf`:
+The unified setup script can build and start the server through local Caddy.
+The browser-facing endpoint negotiates HTTP/2; Caddy can also use HTTP/3 when
+UDP is available. The C backend stays on loopback:
 
 ```sh
 ./scripts/manage.sh server
@@ -105,6 +106,12 @@ distributions. This may request administrator privileges. Direct CMake builds
 still require those tools and libraries to be installed already. If the server
 config is missing, `manage.sh server` generates `config/server.conf` and asks
 whether to use the local or public profile. Press Ctrl-C to stop the server.
+
+The guided local HTTPS flow and `manage.sh server` install/use Caddy and serve
+the browser-facing site at `https://localhost:8443`. Caddy proxies to the
+native server over loopback TLS on port 8444. Use
+`manage.sh server --native-tls` only when HTTP/1.1 from the C server itself is
+desired.
 
 Native HTTPS is built into the C server. Generate a self-signed certificate for
 local development:
@@ -134,24 +141,19 @@ the development certificate because it is self-signed. Public deployments
 should use a CA-issued certificate and keep the private key readable only by
 the service account.
 
-For local HTTPS through an optional reverse proxy, install
-[Caddy](https://caddyserver.com/docs/install) and run:
+To run the C server directly with native TLS (HTTP/1.1), use:
 
 ```sh
-./scripts/manage.sh server --tls
+./scripts/manage.sh server --native-tls
 ```
 
-This starts Caddy at `https://localhost:8443` with its [internal local
-CA](https://caddyserver.com/docs/caddyfile/directives/tls) and runs the C
-server with TLS on `127.0.0.1:8080`. The generated private server config and Caddyfile
-are under `build/local-tls/`; Ctrl-C stops both processes. If the browser does
-not trust Caddy's certificate, run `caddy trust` once with the permissions
-required by your operating system.
-
-The local Caddy setup is for development on the same machine. For a public
-host, use a real DNS name, allow Caddy to obtain a public certificate, and
-reverse proxy to the server on a loopback-only address. Do not expose the
-plain HTTP backend directly.
+The C server's direct TLS listener advertises HTTP/1.1 only. For HTTP/2 locally,
+use the default `manage.sh server` or the guided menu. Caddy uses its [internal
+local CA](https://caddyserver.com/docs/caddyfile/directives/tls); run `caddy
+trust` if the browser does not trust it. The generated backend config and
+Caddyfile are under `build/local-setup/` (or `build/local-tls/` for the explicit
+`--tls` mode). Ctrl-C stops both processes. For public HTTP/2/HTTP/3 use the
+[domain guide](domain-setup/README.md).
 
 `scripts/manage.sh cert` creates a P-256 self-signed development certificate
 with a Subject Alternative Name. Existing files are preserved by default;

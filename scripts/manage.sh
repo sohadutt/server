@@ -43,9 +43,10 @@ CUPS actions:
   manage.sh cups add-printer [queue-name] [printer-uri] [description]
 
 Server:
-  manage.sh server [config-file]
+  manage.sh server [config-file]        Start behind local Caddy (HTTP/2)
   manage.sh server --native-tls [config-file]
-  manage.sh server --tls [config-file]  Use optional local Caddy proxy
+  manage.sh server --tls [config-file]  Alias for the default Caddy proxy mode
+  The guided local HTTPS setup uses Caddy for HTTP/2; Caddy can also serve HTTP/3
 
 Static Vite applications:
   manage.sh static build NAME SOURCE_DIR [https://your-domain]
@@ -321,6 +322,38 @@ ensure_cups_dependencies() {
   esac
 }
 
+ensure_caddy_dependency() {
+  command -v caddy >/dev/null 2>&1 && return 0
+  case "$(uname -s)" in
+    Darwin)
+      command -v brew >/dev/null 2>&1 || {
+        printf 'Install Homebrew from https://brew.sh to install Caddy.\n' >&2
+        return 1
+      }
+      install_missing_packages brew caddy
+      ;;
+    Linux)
+      if command -v apt-get >/dev/null 2>&1; then
+        install_missing_packages apt caddy
+      elif command -v dnf >/dev/null 2>&1; then
+        install_missing_packages dnf caddy
+      elif command -v pacman >/dev/null 2>&1; then
+        install_missing_packages pacman caddy
+      elif command -v zypper >/dev/null 2>&1; then
+        install_missing_packages zypper caddy
+      else
+        printf 'Install Caddy using its official instructions: https://caddyserver.com/docs/install\n' >&2
+        return 1
+      fi
+      ;;
+    *)
+      printf 'Install Caddy using its official instructions: https://caddyserver.com/docs/install\n' >&2
+      return 1
+      ;;
+  esac
+  require_command caddy
+}
+
 build_project() {
   ensure_build_dependencies || return
   cmake -S "$project_dir" -B "$project_dir/build" || return
@@ -473,7 +506,7 @@ cups_command() {
 }
 
 server_command() {
-  local mode=normal config_file=config/server.conf
+  local mode=proxy config_file=config/server.conf
   case "${1:-}" in
     --help|-h) usage; return 0 ;;
     --tls) mode=proxy; shift ;;
@@ -488,20 +521,19 @@ server_command() {
     config_command "${config_args[@]}" || return
   fi
   build_project || return
-  if [[ "$mode" == normal ]]; then raise_open_file_limit; exec "$project_dir/build/http_server" "$config_file"; fi
   if [[ "$mode" == native ]]; then
     grep -Eq '^[[:space:]]*tls_enabled[[:space:]]*=[[:space:]]*(true|1)[[:space:]]*$' "$config_file" || {
       printf 'Native TLS requires tls_enabled = true (or 1) in %s.\n' "$config_file" >&2; return 2; }
     raise_open_file_limit
     exec "$project_dir/build/http_server" "$config_file"
   fi
-  require_command caddy || { printf 'Install Caddy to use the optional reverse proxy.\n' >&2; return 1; }
+  ensure_caddy_dependency || return
   if [[ ! -f "$project_dir/certs/server.crt" || ! -f "$project_dir/certs/server.key" ]]; then make_certificate localhost 365 || return; fi
   local tls_dir="$project_dir/build/local-tls" server_config="$project_dir/build/local-tls/server.conf" caddyfile="$project_dir/build/local-tls/Caddyfile"
   mkdir -p "$tls_dir"
   {
     cat "$config_file"
-    printf '\n# Generated private TLS backend config.\nhost = 127.0.0.1\nport = 8443\ntls_enabled = true\ntls_certificate_file = %s/certs/server.crt\ntls_private_key_file = %s/certs/server.key\n' "$project_dir" "$project_dir"
+    printf '\n# Generated private TLS backend config.\nhost = 127.0.0.1\nport = 8444\ntls_enabled = true\ntls_certificate_file = %s/certs/server.crt\ntls_private_key_file = %s/certs/server.key\n' "$project_dir" "$project_dir"
   } > "$server_config"
   chmod 600 "$server_config"
   cat > "$caddyfile" <<'CADDY'
@@ -511,7 +543,7 @@ server_command() {
 
 https://localhost:8443 {
   tls internal
-  reverse_proxy https://127.0.0.1:8443 {
+  reverse_proxy https://127.0.0.1:8444 {
     transport http {
       tls_insecure_skip_verify
     }
@@ -525,7 +557,7 @@ CADDY
   trap cleanup_server EXIT INT TERM
   sleep 1
   kill -0 "$server_pid" 2>/dev/null || { printf 'The HTTP server did not start; check config and logs.\n' >&2; return 1; }
-  printf 'HTTPS is available at https://localhost:8443 (Ctrl-C stops both processes).\n'
+  printf 'HTTPS with HTTP/2 (and HTTP/3 where UDP is available) is at https://localhost:8443. Ctrl-C stops both processes.\n'
   printf 'Caddy uses its local CA; run `caddy trust` if needed.\n'
   caddy run --config "$caddyfile" --adapter caddyfile
 }
@@ -853,8 +885,7 @@ run_local() {
     [[ -f "$selected_config" ]] || {
       printf 'Config file not found: %s\n' "$selected_config" >&2; return 1;
     }
-    raise_open_file_limit
-    exec "$project_dir/build/http_server" "$selected_config"
+    server_command --tls "$selected_config"
   fi
   if [[ ! -s "$base_config" ]]; then
     local -a config_args=(init "$base_config")
@@ -893,7 +924,13 @@ run_local() {
       }
     fi
   fi
-  local runtime_dir="$project_dir/build/local-setup" admin_token_file runtime_config runtime_tmp admin_token
+  local runtime_dir="$project_dir/build/local-setup" admin_token_file runtime_config runtime_tmp admin_token backend_port site_address caddyfile
+  ensure_caddy_dependency || return
+  backend_port=$((10#$port + 1))
+  ((backend_port <= 65535)) || { printf 'The HTTPS port must be 65534 or lower to reserve the next port for the backend.\n' >&2; return 2; }
+  if [[ "$certificate_name" == *:* ]]; then site_address="[$certificate_name]:$port"
+  else site_address="$certificate_name:$port"
+  fi
   mkdir -p "$runtime_dir" && chmod 700 "$runtime_dir" || return
   admin_token_file="$runtime_dir/admin.token"
   if [[ ! -s "$admin_token_file" ]]; then
@@ -918,8 +955,8 @@ run_local() {
     cat <<CONFIG
 
 # Generated by scripts/manage.sh. Keep this file private.
-host = $bind_address
-port = $port
+host = 127.0.0.1
+port = $backend_port
 tls_enabled = true
 tls_certificate_file = $certificate
 tls_private_key_file = $private_key
@@ -938,9 +975,33 @@ CONFIG
   fi
   printf 'Starting HTTPS at https://%s:%s/\n' "$certificate_name" "$port"
   printf 'Admin credential is stored in %s (mode 0600).\n' "$admin_token_file"
-  printf 'This development certificate must be trusted by your browser/device.\n'
+  printf 'Caddy terminates browser TLS with HTTP/2; HTTP/3 is available when UDP is reachable.\n'
+  printf "Trust Caddy's local CA with `caddy trust` if needed.\n"
   raise_open_file_limit
-  exec "$project_dir/build/http_server" "$runtime_config"
+  caddyfile="$runtime_dir/Caddyfile"
+  cat > "$caddyfile" <<CADDY
+{
+  admin off
+}
+
+$site_address {
+  bind $bind_address
+  tls internal
+  reverse_proxy https://127.0.0.1:$backend_port {
+    transport http {
+      tls_insecure_skip_verify
+    }
+  }
+}
+CADDY
+  chmod 600 "$caddyfile"
+  "$project_dir/build/http_server" "$runtime_config" &
+  local server_pid=$!
+  cleanup_local_server() { local result=$?; trap - EXIT INT TERM; kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; exit "$result"; }
+  trap cleanup_local_server EXIT INT TERM
+  sleep 1
+  kill -0 "$server_pid" 2>/dev/null || { printf 'The HTTP server did not start; check config and logs.\n' >&2; return 1; }
+  caddy run --config "$caddyfile" --adapter caddyfile
 }
 
 cd "$project_dir"

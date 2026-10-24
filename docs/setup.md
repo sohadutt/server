@@ -13,13 +13,12 @@ non-interactive command forms.
 
 If `config/server.conf` is missing or empty, setup generates a complete private
 config there and asks whether it is for local development or a public server.
-The local profile binds to `127.0.0.1` over HTTP; the guided default setup then
-creates a localhost development certificate, writes a private HTTPS runtime
-config, generates an admin API credential, and starts HTTPS on
-`127.0.0.1:8443`. The public profile binds to `0.0.0.0` with native HTTPS and
-requires a trusted certificate and matching key before starting. Generated
-credentials and runtime files stay under the ignored `build/local-setup/`
-directory.
+The guided setup creates a private HTTPS runtime config, generates an admin API
+credential, and starts Caddy at `127.0.0.1:8443`; Caddy negotiates HTTP/2 and
+proxies to the native TLS server on loopback port 8444. The public profile is
+for a directly exposed native TLS listener and requires a trusted certificate
+and matching key when started with `--native-tls`. Generated credentials and
+runtime files stay under the ignored `build/local-setup/` directory.
 
 The admin credential is saved with mode `0600` at
 `build/local-setup/admin.token`. Keep it private. You can regenerate it by
@@ -48,9 +47,9 @@ worker count based on online CPUs (at least 4, at most 64); set
 `worker_threads = N` in the config to choose a fixed count.
 
 `--check` configures and builds without generating credentials or starting
-services. `--start` launches an existing binary without rebuilding; it prefers
-the guided runtime config when available and otherwise generates
-`config/server.conf`. `config init` uses the tracked
+services. `--start` launches an existing binary through Caddy without
+rebuilding; it prefers the guided runtime config when available and otherwise
+generates `config/server.conf`. `config init` uses the tracked
 `config/server.conf.example` template, writes mode `0600`, and refuses to
 replace a non-empty file unless `--force` is supplied. The interactive profile
 choice defaults to local; non-interactive commands also default to local unless

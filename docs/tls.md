@@ -10,8 +10,10 @@ When enabled, the listener accepts TLS connections only. It does not fall back
 to plain HTTP on that port. The server negotiates TLS 1.2 or newer, uses
 OpenSSL's maintained default cipher configuration at security level 2, disables
 compression and renegotiation, disables TLS early data, and advertises only
-HTTP/1.1 through ALPN. TLS 1.3 is available when supported by the installed
-OpenSSL build and peer. TLS session cache entries expire after five minutes.
+HTTP/1.1 through ALPN. The C server's native listener therefore speaks
+HTTP/1.1; it does not implement HTTP/2 framing. TLS 1.3 is available when
+supported by the installed OpenSSL build and peer. TLS session cache entries
+expire after five minutes.
 HTTPS responses include HSTS; plain HTTP responses do not.
 
 The request parser, JSON endpoints, and streamed print uploads all use the same
@@ -21,6 +23,14 @@ TLS handshakes happen in the bounded worker pool and inherit the connection
 receive timeout. Responses also set a restrictive Content Security Policy,
 `nosniff`, anti-framing, same-origin resource, no-referrer, and no-store
 headers. HSTS is sent only over HTTPS.
+
+For HTTP/2, run the managed HTTPS setup or `./scripts/manage.sh server`; these
+commands put Caddy in front of the loopback-only native listener. Caddy handles
+browser TLS and negotiates HTTP/2, and can negotiate HTTP/3 when UDP is
+available. For public deployments, the Caddy configuration in the
+[domain guide](domain-setup/README.md) provides the same frontend protocol
+support. Native TLS remains available with `--native-tls` for HTTP/1.1-only
+setups.
 
 Generate a local development certificate with:
 
